@@ -1,5 +1,5 @@
 -- Sesiones Punto Cero — esquema para PostgreSQL (Render)
--- Equivalente al esquema SQLite del tablero (drizzle/0001–0005).
+-- Equivalente al esquema SQLite del tablero (drizzle/0001–0007 (la 0006 es solo un dato, sin cambio de esquema)).
 -- Ejecutar una sola vez sobre la base nueva, antes de 0002_seed.sql.
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -56,6 +56,12 @@ CREATE TABLE IF NOT EXISTS monthly_closes (
   actual_sales integer,
   actual_fixed_costs integer,
   actual_variable_costs integer,
+  -- Campos de la calculadora de cierre (drizzle 0007): cómo se cobraron
+  -- las ventas reales y qué se dedujo antes del neto.
+  cash_sales integer,
+  transfer_sales integer,
+  deductions integer,
+  sales_items text,
   notes text,
   updated_at timestamptz NOT NULL DEFAULT now()
 );
