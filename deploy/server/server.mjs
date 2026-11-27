@@ -582,7 +582,35 @@ function statsNormalizeName(s) {
     .trim();
 }
 
-async function getStudioStats() {
+// Meses (AAAA-MM, ascendentes) con algo en el tablero: sesiones por
+// fecha de sesión o de entrega, gastos registrados o un cierre mensual,
+// para que Finanzas y Estadísticas ofrezcan un botón por cada mes con
+// datos, desde el inicio de la historia del estudio.
+async function listMonths() {
+  const sessions = await allSessions();
+  const months = new Set();
+  for (const row of sessions) {
+    const ref = row.session_date ?? row.delivered_at;
+    if (ref) months.add(ref.slice(0, 7));
+  }
+  const { rows: allExpenses } = await pool.query(
+    "SELECT month FROM expenses",
+  );
+  for (const e of allExpenses) months.add(e.month);
+  const { rows: allCloses } = await pool.query(
+    "SELECT month FROM monthly_closes",
+  );
+  for (const c of allCloses) months.add(c.month);
+  return { months: [...months].sort() };
+}
+
+async function getStudioStats(args) {
+  const scopeMonth =
+    args?.month != null && args.month !== ""
+      ? args.month
+      : null;
+  if (scopeMonth != null && !/^\d{4}-\d{2}$/.test(scopeMonth))
+    fail("El mes debe ser AAAA-MM");
   const sessions = await allSessions();
   const { rows: allCloses } = await pool.query(
     "SELECT * FROM monthly_closes",
@@ -603,6 +631,19 @@ async function getStudioStats() {
   // Misma regla que Finanzas: el apartado de un no-show sin fecha
   // cuenta en el mes actual.
   const noShowMonth = (row) => monthOf(row) ?? currentMonth;
+
+  // Alcance opcional por mes: con mes, todas las cifras salvo la
+  // serie por mes se calculan solo con las sesiones de ese mes.
+  // Sin mes, cubre toda la historia, desde el inicio.
+  const rows =
+    scopeMonth == null
+      ? sessions
+      : sessions.filter(
+          (row) =>
+            (row.status === "no_show"
+              ? noShowMonth(row)
+              : monthOf(row)) === scopeMonth,
+        );
 
   // --- serie por mes --------------------------------------------------------
   const monthKeys = new Set();
@@ -645,6 +686,19 @@ async function getStudioStats() {
     });
   }
 
+  // Con alcance por mes, los ingresos del encabezado son los de ese
+  // mes solos (su cierre real cuando lo hay, su estimado si no).
+  let scopedRevenueTotal = revenueTotal;
+  let scopedRevenueActual = revenueActual;
+  let scopedRevenueEstimated = revenueEstimated;
+  if (scopeMonth != null) {
+    const entry = monthly.find((m) => m.month === scopeMonth);
+    scopedRevenueTotal = entry?.revenue ?? 0;
+    scopedRevenueActual = entry?.is_actual ? scopedRevenueTotal : 0;
+    scopedRevenueEstimated =
+      entry && !entry.is_actual ? scopedRevenueTotal : 0;
+  }
+
   // --- paquetes, clientas, fotos, tipos de entrega --------------------------
   const packageMap = new Map();
   for (const key of Object.keys(PACKAGE_INFO)) {
@@ -661,7 +715,7 @@ async function getStudioStats() {
   let deliveredCount = 0;
   let noShowTotalCount = 0;
 
-  for (const row of sessions) {
+  for (const row of rows) {
     if (row.status === "no_show") {
       noShowTotalCount++;
       continue;
@@ -738,7 +792,7 @@ async function getStudioStats() {
   let withoutBoardDate = 0;
   let pendingOverdue = 0;
   let pendingTotal = 0;
-  for (const row of sessions) {
+  for (const row of rows) {
     if (row.status === "entregada") {
       if (!row.delivery_date || !row.delivered_at) withoutBoardDate++;
       else if (row.delivered_at <= row.delivery_date) onTime++;
@@ -751,7 +805,7 @@ async function getStudioStats() {
   }
 
   // --- respuestas de la encuesta (el formulario de edición) -----------------
-  const surveyRows = sessions.filter((r) => r.status !== "no_show");
+  const surveyRows = rows.filter((r) => r.status !== "no_show");
   const hasSurveyAnswer = (r) =>
     r.face_level != null ||
     r.body_adjustments != null ||
@@ -788,9 +842,10 @@ async function getStudioStats() {
     else firstSessionCounts.sin_dato++;
   }
 
-  const totalSessions = sessions.filter((r) => r.status !== "no_show").length;
+  const totalSessions = rows.filter((r) => r.status !== "no_show").length;
 
   return {
+    scope_month: scopeMonth,
     totals: {
       sessions: totalSessions,
       delivered: deliveredCount,
@@ -804,9 +859,9 @@ async function getStudioStats() {
         photosSessions > 0
           ? Math.round((photosTotal / photosSessions) * 10) / 10
           : 0,
-      revenue_total: revenueTotal,
-      revenue_actual: revenueActual,
-      revenue_estimated: revenueEstimated,
+      revenue_total: scopedRevenueTotal,
+      revenue_actual: scopedRevenueActual,
+      revenue_estimated: scopedRevenueEstimated,
     },
     monthly,
     packages,
@@ -1079,6 +1134,10 @@ const Actions = {
       ],
     );
     return { ok: true, total };
+  },
+
+  async listMonths() {
+    return listMonths();
   },
 
   getStudioStats,
