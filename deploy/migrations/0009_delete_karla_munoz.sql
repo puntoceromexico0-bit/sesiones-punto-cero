@@ -1,0 +1,15 @@
+-- Migración 0009 — borrar la sesión de Karla Muñoz (27 nov 2026).
+--
+-- Es la versión en Postgres de drizzle/0009_delete_karla_munoz_session.sql
+-- (que usa sintaxis SQLite). Borra solo la fila cuyo nombre de clienta es
+-- exactamente 'Karla Muñoz'; Karla Chacón y el resto de sesiones no se tocan.
+--
+-- Verificado antes de escribirla: 'Karla Muñoz' NO estaba en el tablero
+-- (0 ocurrencias en listSessions) ni en Monday, así que en la base de Neon
+-- esto es un no-op (0 filas afectadas). Se guarda igual para que quede
+-- constancia de la baja pedida por Leslye el 27 nov 2026.
+--
+-- Cómo aplicarla: correr este archivo en el editor SQL de Neon (proyecto
+-- sesiones-punto-cero). El servidor de Render NO aplica migraciones solo:
+-- solo crea el esquema y la semilla cuando la base está vacía.
+DELETE FROM sessions WHERE client_name = 'Karla Muñoz';
