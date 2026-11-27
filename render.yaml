@@ -1,0 +1,43 @@
+# Sesiones Punto Cero — despliegue en Render (todo gratis)
+#
+# Crea UN solo recurso con la cuenta de Punto Cero: el servicio web
+# del tablero (deploy/server), que sirve la página y guarda los datos
+# en Postgres.
+#
+# La base de datos NO es de Render: vive en Neon (plan gratuito
+# permanente, sin caducidad). La cadena de conexión de Neon se pega a
+# mano en la variable DATABASE_URL (sync: false = Render la pide al
+# crear el Blueprint y no la guarda en este archivo). Pasos completos
+# en deploy/README.md.
+#
+# Al primer arranque, con la base vacía, el servidor aplica solo el
+# esquema (deploy/server/db/0001_schema_postgres.sql) y los datos
+# actuales exportados del tablero (db/0002_seed.sql): 38 sesiones,
+# 16 gastos y 2 cierres mensuales al 26 nov 2026.
+#
+# El sitio queda protegido con usuario y contraseña (HTTP Basic):
+# el usuario es "puntocero" y la contraseña la genera Render al crear
+# el servicio (se ve y se puede cambiar en el panel del servicio,
+# Environment → BASIC_AUTH_PASSWORD). Compártela solo con Daniela.
+
+services:
+  - type: web
+    name: sesiones-punto-cero
+    runtime: node
+    plan: free
+    rootDir: deploy/server
+    buildCommand: npm install --omit=dev
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      # Cadena de conexión de Neon (con ?sslmode=require al final).
+      # Se llena a mano al crear el Blueprint; no se crea ninguna
+      # base de datos de Render.
+      - key: DATABASE_URL
+        sync: false
+      - key: BASIC_AUTH_USER
+        value: puntocero
+      - key: BASIC_AUTH_PASSWORD
+        generateValue: true
