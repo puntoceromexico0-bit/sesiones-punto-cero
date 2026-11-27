@@ -1,0 +1,1 @@
+{"dependencies":{"pg":"^8.13.1"},"description":"Servidor independiente del tablero Sesiones Punto Cero para Render (Node + Postgres).","engines":{"node":">=20"},"name":"sesiones-punto-cero-web","private":true,"scripts":{"start":"node server.mjs"},"type":"module","version":"1.0.0"}
