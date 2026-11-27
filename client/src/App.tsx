@@ -649,6 +649,15 @@ function SessionCard({
 }) {
   const s = session;
   const delivered = s.status === "entregada";
+  // A session whose date is today or still ahead has not been taken
+  // yet: nothing can be missing from it — the folder, the survey and
+  // the delivery date only exist after the session happens. The card
+  // says so instead of listing everything as pending.
+  const notYetTaken =
+    s.session_date != null &&
+    diffDays(s.session_date) >= 0 &&
+    !delivered &&
+    s.status !== "no_show";
   const eff = effectiveDelivery(s);
   const urg = urgencyOf(s);
   const readyToEdit = s.favorites_chosen && s.status === "pendiente";
@@ -782,6 +791,17 @@ function SessionCard({
         </p>
       )}
 
+      {notYetTaken && s.session_date && (
+        <p className="mt-2 rounded-xl bg-[#d9b8f5] px-2.5 py-1.5 text-xs font-bold text-[#241263]">
+          Sesión por tomar · {formatDate(s.session_date)} ·{" "}
+          {relativeLabel(s.session_date)}
+          <span className="block font-semibold">
+            Aún no se toma la sesión: la carpeta, la encuesta y la fecha de
+            entrega se llenan después de ese día.
+          </span>
+        </p>
+      )}
+
       <div className="mt-2 flex flex-wrap items-center gap-1.5">
         {s.delivery_type === "EXPRESS" && (
           <span className="rounded-md bg-[#d92b4a] px-2 py-0.5 text-[11px] font-extrabold tracking-wide text-white">
@@ -844,6 +864,11 @@ function SessionCard({
               </span>
             )}
           </span>
+        ) : notYetTaken ? (
+          <span className="font-medium text-[var(--dim)]">
+            La entrega se cuenta desde que se suba la carpeta, después de
+            la sesión
+          </span>
         ) : (
           <span className="font-medium text-[var(--dim)]">
             Sin fecha de entrega
@@ -893,7 +918,7 @@ function SessionCard({
             .join(" · ")}
         </p>
       )}
-      {!hasSurvey(s) && !delivered && (
+      {!hasSurvey(s) && !delivered && !notYetTaken && (
         <p className="mt-1.5 text-xs text-[var(--dim)] italic">
           Sin respuestas de la encuesta de edición
         </p>
@@ -4552,6 +4577,345 @@ function StatsContent({ month }: { month: string | null }) {
   );
 }
 
+/* ---------- calendar view: sessions taken and to be taken ---------- */
+
+/* The calendar answers a different question than the delivery board:
+   not "what is missing" but "when is each session". Every session with
+   a session date lands on its day — sessions whose date already passed
+   are tomadas (taken), future ones are por tomar (still to be taken),
+   with delivered and no-show states in their own colors. Sessions
+   without a date are listed below the grid so none of them hides. */
+
+const WEEKDAY_HEADS = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"];
+const monthTitleFmt = new Intl.DateTimeFormat("es-MX", {
+  month: "long",
+  year: "numeric",
+});
+
+type CalState = "tomada" | "hoy" | "por_tomar" | "entregada" | "no_show";
+
+function calendarState(s: Session): CalState {
+  if (s.status === "no_show") return "no_show";
+  if (s.status === "entregada") return "entregada";
+  if (!s.session_date) return "por_tomar";
+  const d = diffDays(s.session_date);
+  if (d > 0) return "por_tomar";
+  if (d === 0) return "hoy";
+  return "tomada";
+}
+
+const CAL_CHIP_CLASS: Record<CalState, string> = {
+  tomada: "bg-white text-[#1b1be0]",
+  hoy: "bg-[#1b1be0] text-white ring-1 ring-white",
+  por_tomar: "bg-[#d9b8f5] text-[#241263]",
+  entregada: "bg-[#0a8a55] text-white",
+  no_show: "bg-[#17141f] text-white/75 line-through",
+};
+
+const CAL_STATE_LABEL: Record<CalState, string> = {
+  tomada: "Tomada",
+  hoy: "Se toma hoy",
+  por_tomar: "Por tomar",
+  entregada: "Entregada",
+  no_show: "No-show",
+};
+
+function CalendarView({
+  sessions,
+  onOpen,
+}: {
+  sessions: Session[];
+  onOpen: (s: Session) => void;
+}) {
+  const now = new Date();
+  const [cursor, setCursor] = useState({
+    y: now.getFullYear(),
+    m: now.getMonth(),
+  });
+
+  const byDate = useMemo(() => {
+    const map = new Map<string, Session[]>();
+    for (const s of sessions) {
+      if (!s.session_date) continue;
+      const list = map.get(s.session_date) ?? [];
+      list.push(s);
+      map.set(s.session_date, list);
+    }
+    return map;
+  }, [sessions]);
+
+  const monthKey = `${cursor.y}-${String(cursor.m + 1).padStart(2, "0")}`;
+  const monthSessions = useMemo(
+    () =>
+      sessions
+        .filter((s) => s.session_date?.startsWith(monthKey))
+        .sort(
+          (a, b) =>
+            (a.session_date ?? "").localeCompare(b.session_date ?? "") ||
+            a.id - b.id,
+        ),
+    [sessions, monthKey],
+  );
+  const noDate = useMemo(
+    () => sessions.filter((s) => !s.session_date),
+    [sessions],
+  );
+
+  const first = new Date(cursor.y, cursor.m, 1);
+  const lead = (first.getDay() + 6) % 7; // weeks start on Monday
+  const daysInMonth = new Date(cursor.y, cursor.m + 1, 0).getDate();
+  const cells: (string | null)[] = [
+    ...Array.from({ length: lead }, () => null),
+    ...Array.from({ length: daysInMonth }, (_, i) =>
+      fmtDate(new Date(cursor.y, cursor.m, i + 1)),
+    ),
+  ];
+  while (cells.length % 7 !== 0) cells.push(null);
+
+  const today = todayString();
+  const isCurrentMonth =
+    cursor.y === now.getFullYear() && cursor.m === now.getMonth();
+  const move = (delta: number) =>
+    setCursor((c) => {
+      const d = new Date(c.y, c.m + delta, 1);
+      return { y: d.getFullYear(), m: d.getMonth() };
+    });
+
+  let tomadas = 0;
+  let porTomar = 0;
+  for (const s of monthSessions) {
+    const st = calendarState(s);
+    if (st === "tomada" || st === "entregada") tomadas++;
+    if (st === "por_tomar" || st === "hoy") porTomar++;
+  }
+
+  const rawTitle = monthTitleFmt.format(first);
+  const title = rawTitle.charAt(0).toUpperCase() + rawTitle.slice(1);
+
+  return (
+    <div>
+      {/* Month navigation */}
+      <div className="mt-4 flex items-center gap-2">
+        <button
+          type="button"
+          aria-label="Mes anterior"
+          onClick={() => move(-1)}
+          className="glass-soft font-display flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-xl font-bold text-white"
+        >
+          ‹
+        </button>
+        <h2 className="font-display min-w-0 flex-1 text-center text-lg leading-tight font-bold text-white">
+          {title}
+        </h2>
+        <button
+          type="button"
+          aria-label="Mes siguiente"
+          onClick={() => move(1)}
+          className="glass-soft font-display flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-xl font-bold text-white"
+        >
+          ›
+        </button>
+        {!isCurrentMonth && (
+          <button
+            type="button"
+            aria-label="Volver al mes actual"
+            onClick={() =>
+              setCursor({ y: now.getFullYear(), m: now.getMonth() })
+            }
+            className="shrink-0 rounded-full bg-white px-3 py-2 text-xs font-bold text-[#1b1be0]"
+          >
+            Hoy
+          </button>
+        )}
+      </div>
+
+      <p className="mt-2 text-center text-xs font-semibold text-white/85">
+        {monthSessions.length === 0
+          ? "Sin sesiones este mes"
+          : `${tomadas} tomada${tomadas === 1 ? "" : "s"} · ${porTomar} por tomar`}
+      </p>
+
+      {/* Weekday header + month grid */}
+      <div
+        className="mt-3 grid grid-cols-7 gap-1"
+        role="group"
+        aria-label={`Calendario de sesiones de ${title}`}
+      >
+        {WEEKDAY_HEADS.map((d) => (
+          <p
+            key={d}
+            className="pb-0.5 text-center text-[11px] font-extrabold tracking-wide text-[#d9b8f5] uppercase"
+          >
+            {d}
+          </p>
+        ))}
+        {cells.map((dateStr, i) => {
+          if (dateStr == null) return <div key={`blank-${i}`} aria-hidden="true" />;
+          const daySessions = byDate.get(dateStr) ?? [];
+          const isToday = dateStr === today;
+          return (
+            <div
+              key={dateStr}
+              className={`min-h-[64px] rounded-xl p-1 ${
+                isToday
+                  ? "bg-white/25 ring-2 ring-white"
+                  : "bg-white/10"
+              }`}
+            >
+              <p
+                className={`text-[11px] leading-none font-bold ${
+                  isToday ? "text-white" : "text-white/80"
+                }`}
+              >
+                {Number(dateStr.slice(8))}
+                {isToday && <span className="ml-1 font-extrabold">hoy</span>}
+              </p>
+              <div className="mt-1 space-y-0.5">
+                {daySessions.map((s) => (
+                  <button
+                    key={s.id}
+                    type="button"
+                    aria-label={`${s.client_name}, ${CAL_STATE_LABEL[calendarState(s)]}, ${formatDate(dateStr)}. Abrir la sesión`}
+                    onClick={() => onOpen(s)}
+                    className={`block w-full truncate rounded-md px-1 py-0.5 text-left text-[10px] leading-tight font-bold ${CAL_CHIP_CLASS[calendarState(s)]}`}
+                  >
+                    {s.client_name}
+                  </button>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Legend */}
+      <div
+        className="mt-3 flex flex-wrap gap-x-3 gap-y-1.5"
+        aria-label="Leyenda del calendario"
+      >
+        {(
+          [
+            ["tomada", "Tomada (ya pasó su fecha)"],
+            ["por_tomar", "Por tomar"],
+            ["entregada", "Entregada"],
+            ["no_show", "No-show"],
+          ] as [CalState, string][]
+        ).map(([st, label]) => (
+          <span
+            key={st}
+            className="flex items-center gap-1.5 text-[11px] font-semibold text-white/90"
+          >
+            <span
+              aria-hidden="true"
+              className={`inline-block h-3 w-3 rounded ${CAL_CHIP_CLASS[st]}`}
+            />
+            {label}
+          </span>
+        ))}
+      </div>
+
+      {/* The month's sessions, in date order */}
+      {monthSessions.length > 0 && (
+        <section aria-label={`Sesiones de ${title}`} className="mt-5">
+          <h3 className="font-display text-sm font-bold tracking-[0.14em] text-[#d9b8f5] uppercase">
+            Sesiones del mes
+          </h3>
+          <div className="mt-2.5 space-y-2">
+            {monthSessions.map((s) => {
+              const st = calendarState(s);
+              return (
+                <button
+                  key={s.id}
+                  type="button"
+                  aria-label={`Abrir la sesión de ${s.client_name}`}
+                  onClick={() => onOpen(s)}
+                  className="glass flex w-full items-center gap-3 rounded-2xl px-3.5 py-2.5 text-left"
+                >
+                  <span className="w-14 shrink-0 text-center">
+                    <span className="font-display block text-xl leading-none font-bold text-[var(--text)]">
+                      {s.session_date ? Number(s.session_date.slice(8)) : "—"}
+                    </span>
+                    <span className="mt-0.5 block text-[11px] font-semibold text-[var(--dim)] capitalize">
+                      {s.session_date
+                        ? formatDate(s.session_date).split(",")[0]
+                        : ""}
+                    </span>
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-bold text-[var(--text)]">
+                      {s.client_name}
+                      {s.package_label && (
+                        <span className="ml-1.5 text-xs font-semibold text-[var(--dim)]">
+                          {s.package_label}
+                        </span>
+                      )}
+                    </span>
+                    <span className="block text-xs text-[var(--dim)]">
+                      {s.session_date && formatDate(s.session_date)}
+                      {s.delivery_type === "EXPRESS" && " · EXPRESS"}
+                      {s.status === "en_edicion" && " · en edición"}
+                    </span>
+                  </span>
+                  <span
+                    className={`shrink-0 rounded-md px-2 py-1 text-[11px] font-extrabold ${CAL_CHIP_CLASS[st]}`}
+                  >
+                    {st === "por_tomar" && s.session_date
+                      ? `Por tomar · ${relativeLabel(s.session_date)}`
+                      : CAL_STATE_LABEL[st]}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
+      {/* Sessions without a date never hide */}
+      {noDate.length > 0 && (
+        <section aria-label="Sesiones sin fecha de sesión" className="mt-6">
+          <h3 className="font-display text-sm font-bold tracking-[0.14em] text-[#d9b8f5] uppercase">
+            Sin fecha de sesión · {noDate.length}
+          </h3>
+          <p className="mt-1 text-xs text-white/85">
+            Todavía no tienen fecha registrada, por eso no salen en el
+            calendario. Toca una para ponerle fecha.
+          </p>
+          <div className="mt-2.5 space-y-2">
+            {noDate.map((s) => (
+              <button
+                key={s.id}
+                type="button"
+                aria-label={`Abrir la sesión de ${s.client_name} para ponerle fecha`}
+                onClick={() => onOpen(s)}
+                className="glass flex w-full items-center gap-3 rounded-2xl px-3.5 py-2.5 text-left"
+              >
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm font-bold text-[var(--text)]">
+                    {s.client_name}
+                    {s.package_label && (
+                      <span className="ml-1.5 text-xs font-semibold text-[var(--dim)]">
+                        {s.package_label}
+                      </span>
+                    )}
+                  </span>
+                  <span className="block text-xs text-[var(--dim)]">
+                    {STATUS_META[s.status].label}
+                    {s.delivery_date &&
+                      ` · entrega ${formatDate(s.delivery_date)}`}
+                  </span>
+                </span>
+                <span className="shrink-0 rounded-md bg-[var(--surface-alt)] px-2 py-1 text-[11px] font-extrabold text-[var(--dim)]">
+                  Sin fecha
+                </span>
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
+    </div>
+  );
+}
+
 /* ---------- main board ---------- */
 
 type Filter = "todas" | "pendientes" | "express" | "entregadas";
@@ -4575,9 +4939,9 @@ export function App() {
   >(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [syncNote, setSyncNote] = useState<string | null>(null);
-  const [view, setView] = useState<"tablero" | "finanzas" | "estadisticas">(
-    "tablero",
-  );
+  const [view, setView] = useState<
+    "tablero" | "calendario" | "finanzas" | "estadisticas"
+  >("tablero");
   const [finMonth, setFinMonth] = useState(() => todayString().slice(0, 7));
 
   const sessionsQuery = useQuery({
@@ -4785,13 +5149,14 @@ export function App() {
 
         {/* View switcher */}
         <div
-          className="mt-4 grid grid-cols-3 gap-1 rounded-2xl bg-white/15 p-1"
+          className="mt-4 grid grid-cols-4 gap-1 rounded-2xl bg-white/15 p-1"
           role="group"
           aria-label="Vista del tablero"
         >
           {(
             [
               { key: "tablero", label: "Tablero" },
+              { key: "calendario", label: "Calendario" },
               { key: "finanzas", label: "Finanzas" },
               { key: "estadisticas", label: "Estadísticas" },
             ] as const
@@ -4802,7 +5167,7 @@ export function App() {
               aria-label={`Ver ${v.label}`}
               aria-pressed={view === v.key}
               onClick={() => setView(v.key)}
-              className={`font-display rounded-xl px-3 py-2 text-sm font-bold ${
+              className={`font-display rounded-xl px-1.5 py-2 text-[13px] font-bold sm:px-3 sm:text-sm ${
                 view === v.key
                   ? "bg-white text-[#1b1be0]"
                   : "text-white"
@@ -4812,6 +5177,13 @@ export function App() {
             </button>
           ))}
         </div>
+
+        {view === "calendario" && (
+          <CalendarView
+            sessions={sessions}
+            onOpen={(s) => setEditor({ mode: "edit", session: s })}
+          />
+        )}
 
         {view === "finanzas" && (
           <FinanceView
