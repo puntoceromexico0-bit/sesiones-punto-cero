@@ -306,49 +306,53 @@ function parseSaleCounts(raw) {
   }
 }
 
-async function getMonthFinance(args) {
-  const month = args.month;
-  if (typeof month !== "string" || !/^\d{4}-\d{2}$/.test(month))
-    fail("El mes debe ser AAAA-MM");
-  const sessions = await allSessions();
-  const { rows: monthExpenses } = await pool.query(
-    "SELECT * FROM expenses WHERE month = $1 ORDER BY id ASC",
-    [month],
-  );
-  const { rows: closeRows } = await pool.query(
-    "SELECT * FROM monthly_closes WHERE month = $1",
-    [month],
-  );
-  const close = closeRows[0] ?? null;
-
-  const inMonth = (row) => {
-    const ref = row.session_date ?? row.delivered_at;
-    return ref != null && ref.startsWith(month);
-  };
-  const currentMonth = new Intl.DateTimeFormat("en-CA", {
+// --- Figuras de finanzas por mes (misma lógica que el tablero) -------------
+// El mes al que pertenece una sesión para finanzas: su fecha de sesión o,
+// si no tiene, su fecha de entrega. Un no-show sin fecha se quedó su
+// apartado de $200, así que por regla cuenta en el mes actual; cualquier
+// otra sesión sin fecha no cuenta en ningún mes.
+function currentMonthChihuahua() {
+  return new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Chihuahua",
     year: "numeric",
     month: "2-digit",
   })
     .format(new Date())
     .slice(0, 7);
-  const noShowInMonth = (row) => {
-    const ref = row.session_date ?? row.delivered_at;
-    return ref != null ? ref.startsWith(month) : month === currentMonth;
-  };
+}
 
+function financeMonthOf(row, currentMonth) {
+  const ref = row.session_date ?? row.delivered_at;
+  if (ref != null) return ref.slice(0, 7);
+  return row.status === "no_show" ? currentMonth : null;
+}
+
+// La foto financiera completa de un mes, calculada desde las filas del
+// tablero. Tanto getMonthFinance (un mes, o todos sumados para la vista
+// general) como getSavings (el 5% que genera cada mes) leen de este único
+// ayudante para que las cifras no puedan discrepar.
+function monthFigures(month, allSessions, allExpenses, close, currentMonth) {
+  const monthSessions = allSessions.filter(
+    (row) => financeMonthOf(row, currentMonth) === month,
+  );
+  const monthExpenses = allExpenses
+    .filter((e) => e.month === month)
+    .sort((a, b) => a.id - b.id);
+
+  // Ventas estimadas calculadas en vivo desde el tablero.
   const byPackageMap = new Map();
   let baseTotal = 0;
   let extrasTotal = 0;
   let expressTotal = 0;
   let sessionsCount = 0;
   let noShowCount = 0;
-  for (const row of sessions) {
+  for (const row of monthSessions) {
     if (row.status === "no_show") {
-      if (noShowInMonth(row)) noShowCount++;
+      noShowCount++;
       continue;
     }
-    if (!inMonth(row)) continue;
+    // Una sesión que la clienta no ha pagado aún no es venta: su monto
+    // completo espera en por cobrar hasta que pague.
     if (row.unpaid) continue;
     sessionsCount++;
     const charges = sessionCharges(row);
@@ -369,17 +373,16 @@ async function getMonthFinance(args) {
   const projected = close?.projected_sales ?? 0;
   const estimateWithProjection = estimateHeadline + projected;
   const actualSales = close?.actual_sales ?? null;
-  const hasEstimate = close?.estimate_sales != null || computedTotal > 0;
-  const difference =
-    actualSales != null && hasEstimate
-      ? actualSales - estimateWithProjection
-      : null;
 
   const fixedRows = monthExpenses.filter((e) => e.kind === "fijo");
   const fixedFromExpenses = fixedRows.reduce((sum, e) => sum + e.amount, 0);
   const variableFromExpenses = monthExpenses
     .filter((e) => e.kind === "variable")
     .reduce((sum, e) => sum + e.amount, 0);
+  // Los gastos fijos siempre cuentan en Finanzas (regla): cuando el mes
+  // tiene filas fijas registradas se usan esas; cuando no tiene ninguna,
+  // valen los montos de referencia (renta, Adobe, Pixieset). Nunca
+  // ambos: no se cuenta dos veces.
   const fixedCostsFromReference = fixedRows.length === 0;
   const fixedCosts = fixedCostsFromReference
     ? FIXED_COSTS_REFERENCE.map((ref) => ({
@@ -401,14 +404,147 @@ async function getMonthFinance(args) {
   const savings = Math.round(net * 0.05 * 100) / 100;
   const each = Math.round((net - savings) * 0.5 * 100) / 100;
 
+  return {
+    monthSessions,
+    monthExpenses,
+    byPackage: [...byPackageMap.entries()].map(([pkg, v]) => ({
+      package: pkg,
+      count: v.count,
+      amount: v.amount,
+    })),
+    baseTotal,
+    extrasTotal,
+    expressTotal,
+    sessionsCount,
+    noShowCount,
+    noShowTotal,
+    computedTotal,
+    estimateHeadline,
+    estimateWithProjection,
+    actualSales,
+    fixedFromExpenses,
+    variableFromExpenses,
+    fixedCosts,
+    fixedCostsFromReference,
+    table: {
+      sales: tableSales,
+      sales_is_actual: actualSales != null,
+      fixed: tableFixed,
+      variable: tableVariable,
+      deductions: tableDeductions,
+      net,
+      savings,
+      each,
+    },
+  };
+}
+
+async function getMonthFinance(args) {
+  const scopeMonth = args.month ?? null;
+  if (scopeMonth != null && !/^\d{4}-\d{2}$/.test(scopeMonth))
+    fail("El mes debe ser AAAA-MM");
+  const sessions = await allSessions();
+  const { rows: allExpenses } = await pool.query("SELECT * FROM expenses");
+  const { rows: allCloses } = await pool.query(
+    "SELECT * FROM monthly_closes",
+  );
+  const closeByMonth = new Map(allCloses.map((c) => [c.month, c]));
+  const currentMonth = currentMonthChihuahua();
+
+  const monthsWithData = new Set();
+  for (const row of sessions) {
+    const m = financeMonthOf(row, currentMonth);
+    if (m) monthsWithData.add(m);
+  }
+  for (const e of allExpenses) monthsWithData.add(e.month);
+  for (const c of allCloses) monthsWithData.add(c.month);
+  const scopeMonths =
+    scopeMonth != null ? [scopeMonth] : [...monthsWithData].sort();
+  const figures = scopeMonths.map((m) =>
+    monthFigures(
+      m,
+      sessions,
+      allExpenses,
+      closeByMonth.get(m) ?? null,
+      currentMonth,
+    ),
+  );
+
+  const sum = (pick) => figures.reduce((acc, f) => acc + pick(f), 0);
+  const byPackageMap = new Map();
+  for (const f of figures) {
+    for (const bp of f.byPackage) {
+      const entry = byPackageMap.get(bp.package) ?? { count: 0, amount: 0 };
+      entry.count += bp.count;
+      entry.amount += bp.amount;
+      byPackageMap.set(bp.package, entry);
+    }
+  }
+
+  const scopeExpenses = figures.flatMap((f) => f.monthExpenses);
+  const scopeCloses = scopeMonths
+    .map((m) => closeByMonth.get(m))
+    .filter((c) => c != null);
+  // Suma un campo del cierre sobre los cierres del alcance; null cuando
+  // ningún cierre del alcance trae ese campo.
+  const sumClose = (pick) => {
+    let total = null;
+    for (const c of scopeCloses) {
+      const v = pick(c);
+      if (v != null) total = (total ?? 0) + v;
+    }
+    return total;
+  };
+  // Partidas de la calculadora sumadas en todo el alcance (las usa el CSV
+  // de la vista general; un mes solo lee su propio cierre).
+  const mergedCounts = {};
+  for (const c of scopeCloses) {
+    const counts = parseSaleCounts(c.sales_items);
+    if (!counts) continue;
+    for (const key of SALE_KEYS)
+      mergedCounts[key] = (mergedCounts[key] ?? 0) + counts[key];
+  }
+  const mergedItems = SALE_KEYS.filter(
+    (key) => (mergedCounts[key] ?? 0) > 0,
+  ).map((key) => ({
+    key,
+    label: SALE_CATALOG[key].label,
+    price: SALE_CATALOG[key].price,
+    count: mergedCounts[key] ?? 0,
+    amount: (mergedCounts[key] ?? 0) * SALE_CATALOG[key].price,
+  }));
+
+  const single = scopeMonth != null ? (figures[0] ?? null) : null;
+  const close =
+    scopeMonth != null ? (closeByMonth.get(scopeMonth) ?? null) : null;
+
+  // La comparación estimado-vs-real solo existe para un mes solo.
+  const estimateHeadline = sum((f) => f.estimateHeadline);
+  const estimateWithProjection = sum((f) => f.estimateWithProjection);
+  const computedTotal = sum((f) => f.computedTotal);
+  const actualSales =
+    scopeMonth != null
+      ? (single?.actualSales ?? null)
+      : sumClose((c) => c.actual_sales);
+  const hasEstimate =
+    scopeMonth != null &&
+    (close?.estimate_sales != null || computedTotal > 0);
+  const difference =
+    actualSales != null && hasEstimate
+      ? actualSales - estimateWithProjection
+      : null;
+
+  // Alertas de gastos fijos: en vista por mes, lo que ese mes registró
+  // por cada concepto de referencia; en la vista general, las sumas de
+  // todo el tiempo.
   const fixedAlerts = FIXED_COSTS_REFERENCE.map((ref) => {
-    const registered = monthExpenses
+    const registered = scopeExpenses
       .filter(
         (e) =>
           e.kind === "fijo" &&
           e.description.toLowerCase().includes(ref.match),
       )
-      .reduce((sum, e) => sum + e.amount, 0);
+      .reduce((acc, e) => acc + e.amount, 0);
     return {
       label: ref.label,
       reference_amount: ref.amount,
@@ -416,8 +552,60 @@ async function getMonthFinance(args) {
     };
   });
 
+  // Los gastos fijos que cuenta la tabla: un mes solo lista sus propias
+  // filas (o la referencia); la vista general agrupa todas las filas
+  // fijas registradas por descripción (o la referencia cuando no hay
+  // ninguna fila fija).
+  let fixedCosts;
+  let fixedCostsFromReference;
+  if (single) {
+    fixedCosts = single.fixedCosts;
+    fixedCostsFromReference = single.fixedCostsFromReference;
+  } else {
+    const allFixed = scopeExpenses.filter((e) => e.kind === "fijo");
+    fixedCostsFromReference = allFixed.length === 0;
+    if (fixedCostsFromReference) {
+      fixedCosts = FIXED_COSTS_REFERENCE.map((ref) => ({
+        label: ref.label,
+        amount: ref.amount,
+        from_reference: true,
+      }));
+    } else {
+      const grouped = new Map();
+      for (const e of allFixed)
+        grouped.set(
+          e.description,
+          (grouped.get(e.description) ?? 0) + e.amount,
+        );
+      fixedCosts = [...grouped.entries()].map(([label, amount]) => ({
+        label,
+        amount,
+        from_reference: false,
+      }));
+    }
+  }
+
+  const table = {
+    sales: sum((f) => f.table.sales),
+    sales_is_actual:
+      figures.length > 0 && figures.every((f) => f.table.sales_is_actual),
+    fixed: sum((f) => f.table.fixed),
+    variable: sum((f) => f.table.variable),
+    deductions: sum((f) => f.table.deductions),
+    net: sum((f) => f.table.net),
+    savings: Math.round(sum((f) => f.table.savings) * 100) / 100,
+    each: Math.round(sum((f) => f.table.each) * 100) / 100,
+  };
+
+  // Por cobrar: en vista por mes solo los cargos pendientes de ese mes;
+  // en la vista general, todo lo que sigue pendiente.
   const receivables = sessions
     .filter((row) => row.status !== "no_show")
+    .filter(
+      (row) =>
+        scopeMonth == null ||
+        financeMonthOf(row, currentMonth) === scopeMonth,
+    )
     .map((row) => ({ row, charges: sessionCharges(row) }))
     .filter(({ row, charges }) =>
       row.unpaid
@@ -426,6 +614,8 @@ async function getMonthFinance(args) {
           (charges.extrasCharge > 0 || charges.expressFee > 0),
     )
     .map(({ row, charges }) => {
+      // Una sesión sin pagar debe todo: paquete + extras + Express.
+      // Una sesión pagada solo debe sus extras / Express sin liquidar.
       const baseCharge = row.unpaid ? charges.base : 0;
       return {
         id: row.id,
@@ -440,65 +630,172 @@ async function getMonthFinance(args) {
     .sort((a, b) => b.total - a.total);
 
   return {
-    month,
+    month: scopeMonth,
     computed: {
-      sessions_count: sessionsCount,
+      sessions_count: sum((f) => f.sessionsCount),
       by_package: [...byPackageMap.entries()].map(([pkg, v]) => ({
         package: pkg,
         count: v.count,
         amount: v.amount,
       })),
-      base_total: baseTotal,
-      extras_total: extrasTotal,
-      express_total: expressTotal,
-      no_show_count: noShowCount,
-      no_show_total: noShowTotal,
+      base_total: sum((f) => f.baseTotal),
+      extras_total: sum((f) => f.extrasTotal),
+      express_total: sum((f) => f.expressTotal),
+      no_show_count: sum((f) => f.noShowCount),
+      no_show_total: sum((f) => f.noShowTotal),
       total: computedTotal,
     },
     close: {
-      estimate_sales: close?.estimate_sales ?? null,
-      projected_sales: close?.projected_sales ?? null,
-      actual_sales: close?.actual_sales ?? null,
-      actual_fixed_costs: close?.actual_fixed_costs ?? null,
-      actual_variable_costs: close?.actual_variable_costs ?? null,
-      cash_sales: close?.cash_sales ?? null,
-      transfer_sales: close?.transfer_sales ?? null,
-      deductions: close?.deductions ?? null,
-      sales_items: (() => {
-        const counts = parseSaleCounts(close?.sales_items ?? null);
-        return counts ? saleItemsList(counts) : [];
-      })(),
-      notes: close?.notes ?? null,
+      estimate_sales:
+        scopeMonth != null
+          ? (close?.estimate_sales ?? null)
+          : sumClose((c) => c.estimate_sales),
+      projected_sales:
+        scopeMonth != null
+          ? (close?.projected_sales ?? null)
+          : sumClose((c) => c.projected_sales),
+      actual_sales: actualSales,
+      actual_fixed_costs:
+        scopeMonth != null
+          ? (close?.actual_fixed_costs ?? null)
+          : sumClose((c) => c.actual_fixed_costs),
+      actual_variable_costs:
+        scopeMonth != null
+          ? (close?.actual_variable_costs ?? null)
+          : sumClose((c) => c.actual_variable_costs),
+      cash_sales:
+        scopeMonth != null
+          ? (close?.cash_sales ?? null)
+          : sumClose((c) => c.cash_sales),
+      transfer_sales:
+        scopeMonth != null
+          ? (close?.transfer_sales ?? null)
+          : sumClose((c) => c.transfer_sales),
+      deductions:
+        scopeMonth != null
+          ? (close?.deductions ?? null)
+          : sumClose((c) => c.deductions),
+      sales_items:
+        scopeMonth != null
+          ? (() => {
+              const counts = parseSaleCounts(close?.sales_items ?? null);
+              return counts ? saleItemsList(counts) : [];
+            })()
+          : mergedItems,
+      notes: scopeMonth != null ? (close?.notes ?? null) : null,
     },
     estimate_headline: estimateHeadline,
     estimate_with_projection: estimateWithProjection,
     difference,
     matches: difference != null ? difference === 0 : null,
-    expenses: monthExpenses.map((e) => ({
+    expenses: scopeExpenses.map((e) => ({
       id: e.id,
+      month: e.month,
       expense_date: e.expense_date,
       kind: e.kind,
       description: e.description,
       amount: e.amount,
     })),
-    fixed_total: fixedFromExpenses,
-    variable_total: variableFromExpenses,
-    table: {
-      sales: tableSales,
-      sales_is_actual: actualSales != null,
-      fixed: tableFixed,
-      variable: tableVariable,
-      deductions: tableDeductions,
-      net,
-      savings,
-      each,
-    },
+    fixed_total: sum((f) => f.fixedFromExpenses),
+    variable_total: sum((f) => f.variableFromExpenses),
+    table,
     fixed_alerts: fixedAlerts,
     fixed_costs: fixedCosts,
     fixed_costs_from_reference: fixedCostsFromReference,
     receivables,
-    receivables_total: receivables.reduce((sum, r) => sum + r.total, 0),
+    receivables_total: receivables.reduce((acc, r) => acc + r.total, 0),
   };
+}
+
+// --- Ahorro (misma lógica que el tablero) -----------------------------------
+// El saldo se genera en vivo: cada mes con datos aporta el 5% de su tabla
+// de finanzas (el cierre real cuando el mes tiene uno, el estimado del
+// tablero si no), y los abonos/retiros registrados lo suben o lo bajan.
+// No se guarda nada más que los movimientos manuales.
+async function getSavings() {
+  const sessions = await allSessions();
+  const { rows: allExpenses } = await pool.query("SELECT * FROM expenses");
+  const { rows: allCloses } = await pool.query(
+    "SELECT * FROM monthly_closes",
+  );
+  const closeByMonth = new Map(allCloses.map((c) => [c.month, c]));
+  const currentMonth = currentMonthChihuahua();
+
+  const months = new Set();
+  for (const row of sessions) {
+    const m = financeMonthOf(row, currentMonth);
+    if (m) months.add(m);
+  }
+  for (const c of allCloses) months.add(c.month);
+
+  const monthly = [];
+  let generatedTotal = 0;
+  for (const m of [...months].sort()) {
+    const close = closeByMonth.get(m) ?? null;
+    const figures = monthFigures(
+      m,
+      sessions,
+      allExpenses,
+      close,
+      currentMonth,
+    );
+    monthly.push({
+      month: m,
+      savings: figures.table.savings,
+      is_actual: close?.actual_sales != null,
+    });
+    generatedTotal += figures.table.savings;
+  }
+  generatedTotal = Math.round(generatedTotal * 100) / 100;
+
+  const { rows: movementRows } = await pool.query(
+    "SELECT * FROM savings_movements ORDER BY id DESC",
+  );
+  let depositsTotal = 0;
+  let withdrawalsTotal = 0;
+  for (const mv of movementRows) {
+    if (mv.kind === "abono") depositsTotal += mv.amount;
+    else withdrawalsTotal += mv.amount;
+  }
+  return {
+    balance:
+      Math.round(
+        (generatedTotal + depositsTotal - withdrawalsTotal) * 100,
+      ) / 100,
+    generated_total: generatedTotal,
+    deposits_total: depositsTotal,
+    withdrawals_total: withdrawalsTotal,
+    monthly: monthly.reverse(),
+    movements: movementRows.map((mv) => ({
+      id: mv.id,
+      movement_date: mv.movement_date,
+      kind: mv.kind,
+      description: mv.description,
+      amount: mv.amount,
+    })),
+  };
+}
+
+async function addSavingsMovement(args) {
+  const kind = optEnum(args.kind, ["abono", "retiro"]);
+  if (kind == null) fail("Falta el tipo de movimiento");
+  const amount = optInt(args.amount, 1, 10000000);
+  if (amount == null) fail("Falta el monto");
+  const description = reqText(args.description, 200);
+  const movementDate = optDate(args.movement_date);
+  const { rows } = await pool.query(
+    "INSERT INTO savings_movements (kind, amount, description, movement_date) VALUES ($1, $2, $3, $4) RETURNING id",
+    [kind, amount, description, movementDate],
+  );
+  if (!rows[0]) fail("addSavingsMovement: insert returned no rows");
+  return { id: rows[0].id };
+}
+
+async function deleteSavingsMovement(args) {
+  await pool.query("DELETE FROM savings_movements WHERE id = $1", [
+    reqId(args.id),
+  ]);
+  return { ok: true };
 }
 
 // --- Estadísticas (mismos agregados que el tablero) ------------------------
@@ -1047,6 +1344,9 @@ const Actions = {
   },
 
   getMonthFinance,
+  getSavings,
+  addSavingsMovement,
+  deleteSavingsMovement,
 
   async saveMonthlyClose(args) {
     const month = args.month;
