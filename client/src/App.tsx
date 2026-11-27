@@ -567,7 +567,7 @@ function Checklist({
     },
     {
       key: "enviada",
-      label: "Enviada",
+      label: "Subida",
       done: s.sent,
       toggle: () => onProgress({ sent: !s.sent }),
     },
