@@ -1,0 +1,161 @@
+@import url('https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,400..900;1,400..700&display=swap');
+@import "tailwindcss";
+@import "tailwindcss-safe-area";
+
+@theme {
+  --text-xs: 12px;
+  --text-xs--line-height: 16px;
+  --text-sm: 14px;
+  --text-sm--line-height: 20px;
+  --text-base: 16px;
+  --text-base--line-height: 24px;
+  --text-lg: 18px;
+  --text-lg--line-height: 28px;
+  --text-xl: 20px;
+  --text-xl--line-height: 28px;
+  --text-2xl: 24px;
+  --text-2xl--line-height: 32px;
+  --text-3xl: 30px;
+  --text-3xl--line-height: 36px;
+  --text-4xl: 36px;
+  --text-4xl--line-height: 40px;
+  --text-5xl: 48px;
+  --text-5xl--line-height: 52px;
+  /* Brand typography (Punto Cero's design guide): All Round Gothic for
+     titles, Montserrat for everything else. All Round Gothic is not
+     available as a web font, so titles fall back to Montserrat bold —
+     the brand's own fallback — unless a device has All Round Gothic
+     installed locally. */
+  --font-display: "All Round Gothic", "Montserrat", system-ui, sans-serif;
+  --font-sans: "Montserrat", system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+:root {
+  color-scheme: light;
+  /* Punto Cero brand tokens */
+  --brand-blue: #1b1be0;
+  --brand-lavender: #d9b8f5;
+  --brand-violet-deep: #241263;
+  --bg: #241263;
+  --surface: rgba(255, 255, 255, 0.88);
+  --surface-solid: #ffffff;
+  --surface-alt: rgba(217, 184, 245, 0.35);
+  --text: #17141f;
+  --dim: #5d5670;
+  --border: rgba(255, 255, 255, 0.65);
+  --accent: #1b1be0;
+  --accent-ink: #ffffff;
+  --radius: 16px;
+  --space-surface: var(--surface);
+  --space-surface-alt: var(--surface-alt);
+  --space-muted: var(--dim);
+  --space-border: var(--border);
+  --space-accent: var(--accent);
+}
+
+/* The board lives on the deep violet → royal blue → lavender gradient of
+   Punto Cero's price cards, in both system modes: it is the brand's own
+   backdrop, and the glass cards carry dark ink for readability. */
+body {
+  font-family: var(--font-sans);
+  background:
+    radial-gradient(120% 60% at 85% 0%, rgba(217, 184, 245, 0.55) 0%, rgba(217, 184, 245, 0) 55%),
+    linear-gradient(165deg, #241263 0%, #3d1fa8 34%, #1b1be0 68%, #7b5cd6 100%);
+  background-attachment: fixed;
+  min-height: 100vh;
+}
+
+.font-display {
+  font-family: var(--font-display);
+}
+
+.glass {
+  background: var(--surface);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid var(--border);
+}
+
+.glass-soft {
+  background: rgba(255, 255, 255, 0.16);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.35);
+}
+
+/* ---------- delete-a-session animations ----------
+   Tapping the trash button shakes the card a little and pops the
+   confirm bar in; confirming crumples the card away (scale down,
+   tilt, fade and collapse) before the row leaves the board, and the
+   "borrada" toast with its Deshacer button slides up from the
+   bottom. All of it is skipped when the system asks for reduced
+   motion. */
+@keyframes pc-shake {
+  0%, 100% { transform: translateX(0) rotate(0deg); }
+  20% { transform: translateX(-5px) rotate(-0.6deg); }
+  40% { transform: translateX(5px) rotate(0.6deg); }
+  60% { transform: translateX(-3px) rotate(-0.4deg); }
+  80% { transform: translateX(3px) rotate(0.4deg); }
+}
+
+@keyframes pc-pop-in {
+  from { opacity: 0; transform: translateY(-4px) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes pc-card-out {
+  0% { opacity: 1; transform: scale(1) rotate(0deg); }
+  35% { opacity: 0.9; transform: scale(0.96) rotate(-1.2deg) translateY(2px); }
+  100% {
+    opacity: 0;
+    transform: scale(0.82) rotate(-2.5deg) translateY(10px);
+    max-height: 0;
+    margin-top: 0;
+    margin-bottom: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    border-width: 0;
+  }
+}
+
+@keyframes pc-toast-in {
+  from { opacity: 0; transform: translate(-50%, 16px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+
+.pc-shake {
+  animation: pc-shake 0.45s ease;
+}
+
+.pc-pop-in {
+  animation: pc-pop-in 0.22s ease;
+}
+
+.pc-card-out {
+  animation: pc-card-out 0.5s ease forwards;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.pc-toast-in {
+  animation: pc-toast-in 0.3s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pc-shake,
+  .pc-pop-in,
+  .pc-card-out,
+  .pc-toast-in {
+    animation: none;
+  }
+  .pc-card-out {
+    opacity: 0;
+  }
+}
+
+/* Phone tap targets: at least 32px tall. */
+@layer base {
+  button, [role="button"], select, summary, input:not([type="checkbox"], [type="radio"]) {
+    min-height: 2rem;
+  }
+}

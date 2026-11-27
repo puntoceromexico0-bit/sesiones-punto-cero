@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -637,12 +637,14 @@ function SessionCard({
   onOpen,
   onStatus,
   onProgress,
+  onDelete,
   busy,
 }: {
   session: Session;
   onOpen: () => void;
   onStatus: (status: Status) => void;
   onProgress: (patch: ProgressPatch) => void;
+  onDelete: () => void;
   busy: boolean;
 }) {
   const s = session;
@@ -656,10 +658,39 @@ function SessionCard({
       ? businessHoursRemaining(eff.date)
       : null;
 
+  // Delete flow, right on the card: the trash button shakes the card
+  // and pops a confirm bar in; confirming crumples the card away and
+  // only then asks the parent to delete the row (the parent offers
+  // Deshacer in a toast afterwards).
+  const [confirming, setConfirming] = useState(false);
+  const [shaking, setShaking] = useState(false);
+  const [leaving, setLeaving] = useState(false);
+
+  useEffect(() => {
+    if (!shaking) return;
+    const t = setTimeout(() => setShaking(false), 500);
+    return () => clearTimeout(t);
+  }, [shaking]);
+
+  const askDelete = () => {
+    setConfirming(true);
+    setShaking(true);
+  };
+
+  const confirmDelete = () => {
+    setConfirming(false);
+    setLeaving(true);
+    const reduced = window.matchMedia(
+      "(prefers-reduced-motion: reduce)",
+    ).matches;
+    setTimeout(onDelete, reduced ? 60 : 480);
+  };
+
   return (
     <article
-      className="glass cursor-pointer rounded-3xl p-3.5 shadow-[0_8px_24px_rgba(20,8,80,0.25)]"
+      className={`glass cursor-pointer rounded-3xl p-3.5 shadow-[0_8px_24px_rgba(20,8,80,0.25)] ${shaking ? "pc-shake" : ""} ${leaving ? "pc-card-out" : ""} ${confirming ? "ring-2 ring-[#d92b4a]" : ""}`}
       onClick={onOpen}
+      aria-hidden={leaving || undefined}
     >
       <div className="flex items-start justify-between gap-2">
         <h3 className="font-display min-w-0 text-base leading-snug font-bold text-[var(--text)]">
@@ -683,10 +714,67 @@ function SessionCard({
             </span>
           )}
         </h3>
-        <div onClick={(e) => e.stopPropagation()}>
+        <div
+          className="flex shrink-0 items-center gap-1.5"
+          onClick={(e) => e.stopPropagation()}
+        >
           <StatusPill status={s.status} onPick={onStatus} disabled={busy} />
+          <button
+            type="button"
+            aria-label={`Borrar la sesión de ${s.client_name}`}
+            disabled={busy || leaving}
+            onClick={askDelete}
+            className="flex h-8 w-8 items-center justify-center rounded-full bg-white/80 text-[#d92b4a] transition-transform active:scale-90 disabled:opacity-50"
+          >
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M3 6h18" />
+              <path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" />
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+              <path d="M10 11v6" />
+              <path d="M14 11v6" />
+            </svg>
+          </button>
         </div>
       </div>
+
+      {confirming && (
+        <div
+          className="pc-pop-in mt-2.5 flex flex-wrap items-center gap-2 rounded-2xl bg-[#d92b4a] px-3 py-2.5"
+          role="alert"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <p className="min-w-0 flex-1 text-sm font-bold text-white">
+            ¿Borrar la sesión de {s.client_name}? Sale del tablero y de
+            Finanzas.
+          </p>
+          <button
+            type="button"
+            aria-label={`Sí, borrar la sesión de ${s.client_name}`}
+            onClick={confirmDelete}
+            className="rounded-xl bg-white px-3 py-1.5 text-sm font-extrabold text-[#d92b4a] transition-transform active:scale-95"
+          >
+            Sí, borrar
+          </button>
+          <button
+            type="button"
+            aria-label="Cancelar, no borrar la sesión"
+            onClick={() => setConfirming(false)}
+            className="rounded-xl bg-white/25 px-3 py-1.5 text-sm font-bold text-white"
+          >
+            Cancelar
+          </button>
+        </div>
+      )}
 
       {s.publish_permission === "NO" && (
         <p className="mt-2 flex items-center gap-1.5 rounded-xl bg-[#d92b4a] px-2.5 py-1.5 text-xs font-extrabold tracking-wide text-white">
@@ -1460,7 +1548,7 @@ function EditorSheet({
         {sessionId != null && (
           <div className="mt-4 border-t border-[#ddd3f5] pt-3">
             {confirmDelete ? (
-              <div className="flex items-center gap-2">
+              <div className="pc-pop-in flex items-center gap-2">
                 <p className="flex-1 text-sm font-medium text-[#d92b4a]">
                   ¿Eliminar esta sesión del tablero?
                 </p>
@@ -4533,6 +4621,42 @@ export function App() {
       setActionError("No se pudo actualizar el avance. Inténtalo de nuevo."),
   });
 
+  // Card delete: the card plays its exit animation first and calls
+  // this when it is done. A deleted session can be brought back from
+  // the toast for a few seconds — undo recreates the row with all its
+  // data (it gets a new id, which changes nothing on the board).
+  const [deletedToast, setDeletedToast] = useState<Session | null>(null);
+
+  useEffect(() => {
+    if (!deletedToast) return;
+    const t = setTimeout(() => setDeletedToast(null), 9000);
+    return () => clearTimeout(t);
+  }, [deletedToast]);
+
+  const deleteSession = useMutation({
+    mutationFn: async (s: Session) => await api.deleteSession({ id: s.id }),
+    onSuccess: (_res, s) => {
+      invalidate();
+      setDeletedToast(s);
+    },
+    onError: () =>
+      setActionError("No se pudo borrar la sesión. Inténtalo de nuevo."),
+  });
+
+  const undoDelete = useMutation({
+    mutationFn: async (s: Session) =>
+      await api.createSession({
+        client_name: s.client_name,
+        ...formPayload(formFromSession(s)),
+      }),
+    onSuccess: () => {
+      invalidate();
+      setDeletedToast(null);
+    },
+    onError: () =>
+      setActionError("No se pudo deshacer el borrado. Inténtalo de nuevo."),
+  });
+
   const syncSurvey = useMutation({
     mutationFn: async () => await api.refreshSurveyAnswers({}),
     onSuccess: (res) =>
@@ -4615,7 +4739,8 @@ export function App() {
   }, [visible]);
 
   const deliveredSessions = visible.filter((s) => s.status === "entregada");
-  const busy = setStatus.isPending || setProgress.isPending;
+  const busy =
+    setStatus.isPending || setProgress.isPending || deleteSession.isPending;
 
   const renderCard = (s: Session) => (
     <SessionCard
@@ -4624,6 +4749,7 @@ export function App() {
       onOpen={() => setEditor({ mode: "edit", session: s })}
       onStatus={(status) => setStatus.mutate({ id: s.id, status })}
       onProgress={(patch) => setProgress.mutate({ id: s.id, patch })}
+      onDelete={() => deleteSession.mutate(s)}
       busy={busy}
     />
   );
@@ -4890,6 +5016,34 @@ export function App() {
           }
           onClose={() => setEditor(null)}
         />
+      )}
+
+      {deletedToast && (
+        <div
+          className="pc-toast-in fixed bottom-5 left-1/2 z-50 flex w-[calc(100%-2rem)] max-w-md -translate-x-1/2 items-center gap-2 rounded-2xl bg-[#17141f] px-4 py-3 shadow-2xl"
+          role="status"
+        >
+          <p className="min-w-0 flex-1 text-sm font-bold text-white">
+            Sesión de {deletedToast.client_name} borrada
+          </p>
+          <button
+            type="button"
+            aria-label="Deshacer el borrado de la sesión"
+            disabled={undoDelete.isPending}
+            onClick={() => undoDelete.mutate(deletedToast)}
+            className="shrink-0 rounded-xl bg-white px-3 py-1.5 text-sm font-extrabold text-[#1b1be0] disabled:opacity-60"
+          >
+            {undoDelete.isPending ? "Restaurando…" : "Deshacer"}
+          </button>
+          <button
+            type="button"
+            aria-label="Cerrar aviso de sesión borrada"
+            onClick={() => setDeletedToast(null)}
+            className="shrink-0 rounded-full px-2 py-1 text-sm font-bold text-white/70"
+          >
+            ✕
+          </button>
+        </div>
       )}
     </div>
   );
