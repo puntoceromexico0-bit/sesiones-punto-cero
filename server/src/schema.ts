@@ -91,6 +91,23 @@ export const expenses = sqliteTable("expenses", {
     .$defaultFn(() => new Date()),
 });
 
+// Manual movements of the studio's savings (ahorro). The 5% each month
+// generates is computed live from the finance tables, so this table only
+// holds what the partners register by hand: abonos (extra money put into
+// the savings) and retiros (money taken out of the savings, e.g. to pay
+// an expense). Balance = generated 5% total + abonos − retiros.
+export const savingsMovements = sqliteTable("savings_movements", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  kind: text("kind", { enum: ["abono", "retiro"] }).notNull(),
+  amount: integer("amount").notNull(),
+  description: text("description").notNull(),
+  // Date of the movement, YYYY-MM-DD; null when not specified.
+  movementDate: text("movement_date"),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
 // One row per month: the registered estimate (from Leslye's own analysis)
 // and Daniela's real close figures once her Excel arrives, so the board can
 // compare estimate vs. real and say whether it matches.
