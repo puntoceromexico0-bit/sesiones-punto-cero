@@ -813,7 +813,8 @@ export const Actions = {
   }),
 
   deleteSession: defineAction({
-    description: "Deletes one session row from the board.",
+    description:
+      "Deletes one session row from the board (trash button on the session card, or the editor). The board offers Deshacer right after, which recreates the row with its data.",
     request: z.object({ id: z.number().int().positive() }),
     response: okResponse,
     handler: async (ctx, args): Promise<z.infer<typeof okResponse>> => {
