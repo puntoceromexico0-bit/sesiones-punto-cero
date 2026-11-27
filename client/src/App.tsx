@@ -1986,6 +1986,60 @@ function ExcelImportCard({ month }: { month: string }) {
   );
 }
 
+/* Month buttons shared by Finanzas and Estadísticas: one button per
+   month that has data on the board (from the listMonths action),
+   newest first, in a row that scrolls sideways on the phone.
+   Estadísticas passes a generalLabel to add the "whole history"
+   button at the start. */
+function MonthChips({
+  months,
+  selected,
+  onSelect,
+  generalLabel,
+}: {
+  months: string[];
+  selected: string | null;
+  onSelect: (month: string | null) => void;
+  generalLabel?: string;
+}) {
+  const ordered = [...months].sort().reverse();
+  const chipClass = (active: boolean) =>
+    `shrink-0 rounded-full px-3 py-1.5 text-xs font-bold whitespace-nowrap ${
+      active ? "bg-white text-[#1b1be0]" : "glass-soft text-white"
+    }`;
+  return (
+    <div
+      className="flex gap-1.5 overflow-x-auto pb-1"
+      role="group"
+      aria-label="Elegir mes"
+    >
+      {generalLabel != null && (
+        <button
+          type="button"
+          aria-label="Ver todo, desde el inicio"
+          aria-pressed={selected == null}
+          onClick={() => onSelect(null)}
+          className={chipClass(selected == null)}
+        >
+          {generalLabel}
+        </button>
+      )}
+      {ordered.map((m) => (
+        <button
+          key={m}
+          type="button"
+          aria-label={`Ver ${monthLabel(m)}`}
+          aria-pressed={selected === m}
+          onClick={() => onSelect(m)}
+          className={chipClass(selected === m)}
+        >
+          {monthLabel(m)}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function FinanceView({
   sessions,
   month,
@@ -2002,9 +2056,24 @@ function FinanceView({
   });
   const fin = finQuery.data;
 
+  // One button per month with data on the board, so any month of the
+  // studio's history is one tap away (the arrows still walk month by
+  // month, including months without data yet).
+  const monthsQuery = useQuery({
+    queryKey: ["months"],
+    queryFn: () => api.listMonths({}),
+  });
+  const chipMonths = useMemo(() => {
+    const set = new Set(monthsQuery.data?.months ?? []);
+    set.add(month);
+    return [...set];
+  }, [monthsQuery.data, month]);
+
   const invalidateFinance = () => {
     queryClient.invalidateQueries({ queryKey: ["finance"] });
     queryClient.invalidateQueries({ queryKey: ["sessions"] });
+    queryClient.invalidateQueries({ queryKey: ["months"] });
+    queryClient.invalidateQueries({ queryKey: ["stats"] });
   };
 
   type CalcForm = {
@@ -2297,6 +2366,15 @@ function FinanceView({
           →
         </button>
       </div>
+
+      {/* Direct jump to any month with data */}
+      <MonthChips
+        months={chipMonths}
+        selected={month}
+        onSelect={(m) => {
+          if (m) onMonthChange(m);
+        }}
+      />
 
       {finError && (
         <p className="rounded-2xl bg-[#d92b4a] px-3 py-2 text-sm font-bold text-white">
@@ -3326,9 +3404,30 @@ function SurveyBars({
 }
 
 function StatsView() {
+  // null = the general view: the whole history, from the beginning.
+  // A month scopes every figure below to that month's sessions.
+  const [statsMonth, setStatsMonth] = useState<string | null>(null);
+  const monthsQuery = useQuery({
+    queryKey: ["months"],
+    queryFn: () => api.listMonths({}),
+  });
+  return (
+    <div className="mt-4">
+      <MonthChips
+        months={monthsQuery.data?.months ?? []}
+        selected={statsMonth}
+        onSelect={setStatsMonth}
+        generalLabel="General · desde el inicio"
+      />
+      <StatsContent key={statsMonth ?? "general"} month={statsMonth} />
+    </div>
+  );
+}
+
+function StatsContent({ month }: { month: string | null }) {
   const statsQuery = useQuery({
-    queryKey: ["stats"],
-    queryFn: () => api.getStudioStats({}),
+    queryKey: ["stats", month ?? "general"],
+    queryFn: () => api.getStudioStats({ month }),
   });
   const stats = statsQuery.data;
 
@@ -3386,10 +3485,11 @@ function StatsView() {
   const packageColors = ["#241263", "#1b1be0", "#7b5cd6", "#b18fe8", "#d9b8f5"];
 
   return (
-    <div className="mt-4 space-y-4">
+    <div className="mt-3 space-y-4">
       <p className="glass-soft rounded-2xl px-3 py-2 text-xs font-semibold text-white">
-        Todo se calcula con los datos del tablero: sesiones, paquetes,
-        fechas de entrega e ingresos registrados en Finanzas.
+        {month
+          ? `Mostrando solo ${monthLabel(month)}: sesiones, paquetes, entregas, fotos y respuestas del formulario de ese mes.`
+          : "General: todo desde el inicio — sesiones, paquetes, fechas de entrega e ingresos registrados en Finanzas."}
       </p>
 
       {/* Números grandes */}
@@ -3438,7 +3538,9 @@ function StatsView() {
         />
       </div>
 
-      {/* Sesiones por mes */}
+      {/* Sesiones por mes e ingresos por mes solo aparecen en la vista
+          general: ya son el desglose de toda la historia mes a mes. */}
+      {!month && (
       <section aria-label="Sesiones por mes" className={statsCardClass}>
         <h3 className={statsTitleClass}>Sesiones por mes</h3>
         {monthlyData.length === 0 ? (
@@ -3487,8 +3589,9 @@ function StatsView() {
           apartados de no-show no cuentan como sesión.
         </p>
       </section>
+      )}
 
-      {/* Ingresos por mes */}
+      {!month && (
       <section aria-label="Ingresos por mes" className={statsCardClass}>
         <h3 className={statsTitleClass}>Ingresos por mes</h3>
         {monthlyData.length === 0 ? (
@@ -3551,6 +3654,7 @@ function StatsView() {
           </>
         )}
       </section>
+      )}
 
       {/* Paquetes más vendidos */}
       <section aria-label="Paquetes más vendidos" className={statsCardClass}>
@@ -3780,8 +3884,8 @@ function StatsView() {
             </li>
           </ul>
           <p className="mt-2 text-xs text-[var(--dim)]">
-            Porcentajes sobre las {t.sessions} sesiones del tablero (sin
-            contar no-shows).
+            Porcentajes sobre las {t.sessions} sesiones{" "}
+            {month ? "del mes" : "del tablero"} (sin contar no-shows).
           </p>
         </section>
       </div>
@@ -3791,7 +3895,9 @@ function StatsView() {
         <h3 className={statsTitleClass}>Clientas que más repiten</h3>
         {stats.top_clients.length === 0 ? (
           <p className="mt-2 text-sm text-[var(--dim)]">
-            Todavía ninguna clienta tiene dos sesiones o más en el tablero.
+            {month
+              ? "Ninguna clienta repitió dentro de este mes."
+              : "Todavía ninguna clienta tiene dos sesiones o más en el tablero."}
           </p>
         ) : (
           <div className="mt-2 overflow-x-auto">
@@ -4012,6 +4118,7 @@ export function App() {
     queryClient.invalidateQueries({ queryKey: ["sessions"] });
     queryClient.invalidateQueries({ queryKey: ["finance"] });
     queryClient.invalidateQueries({ queryKey: ["stats"] });
+    queryClient.invalidateQueries({ queryKey: ["months"] });
   };
 
   const setStatus = useMutation({
