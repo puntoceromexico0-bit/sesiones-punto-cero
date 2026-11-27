@@ -2040,6 +2040,307 @@ function MonthChips({
   );
 }
 
+/* ---------- savings (ahorro) ---------- */
+
+// The savings balance card: the 5% every month generates (computed live
+// from the same finance tables, real close or estimate) plus the manual
+// movements the partners register — an abono raises the balance, a
+// retiro (money taken out of the savings, e.g. to pay an expense) lowers
+// it. It always shows the current total, whatever the finance scope is.
+function SavingsCard() {
+  const queryClient = useQueryClient();
+  const savingsQuery = useQuery({
+    queryKey: ["savings"],
+    queryFn: () => api.getSavings({}),
+  });
+  const sav = savingsQuery.data;
+  const [open, setOpen] = useState(false);
+  const [form, setForm] = useState({
+    kind: "retiro" as "abono" | "retiro",
+    amount: "",
+    description: "",
+    date: "",
+  });
+  const [formError, setFormError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const invalidateSavings = () =>
+    queryClient.invalidateQueries({ queryKey: ["savings"] });
+
+  const addMovement = useMutation({
+    mutationFn: async () =>
+      await api.addSavingsMovement({
+        kind: form.kind,
+        amount: Number(form.amount),
+        description: form.description.trim(),
+        movement_date: form.date || null,
+      }),
+    onSuccess: () => {
+      invalidateSavings();
+      setForm({ kind: "retiro", amount: "", description: "", date: "" });
+      setFormError(null);
+    },
+    onError: () => setFormError("No se pudo registrar el movimiento."),
+  });
+  const deleteMovement = useMutation({
+    mutationFn: async (id: number) =>
+      await api.deleteSavingsMovement({ id }),
+    onSuccess: invalidateSavings,
+    onError: () => setActionError("No se pudo eliminar el movimiento."),
+  });
+
+  return (
+    <section
+      aria-label="Ahorro"
+      className="glass rounded-3xl p-4 shadow-[0_8px_24px_rgba(20,8,80,0.25)]"
+    >
+      <div className="flex flex-wrap items-baseline gap-x-3">
+        <h3 className="font-display text-base font-bold text-[var(--text)]">
+          Ahorro actual
+        </h3>
+        <p className="font-display text-3xl leading-none font-bold text-[var(--text)]">
+          {sav ? money2(sav.balance) : "…"}
+        </p>
+      </div>
+      {savingsQuery.isError ? (
+        <p className="mt-2 text-sm text-[var(--dim)]">
+          No se pudo cargar el ahorro.{" "}
+          <button
+            type="button"
+            aria-label="Reintentar cargar el ahorro"
+            onClick={() => savingsQuery.refetch()}
+            className="font-bold text-[#1b1be0] underline"
+          >
+            Reintentar
+          </button>
+        </p>
+      ) : sav ? (
+        <>
+          <p className="mt-1.5 text-sm text-[var(--dim)]">
+            Se junta con el 5% de cada cierre: {money2(sav.generated_total)}{" "}
+            desde el inicio
+            {sav.deposits_total > 0 &&
+              ` · abonos registrados ${money(sav.deposits_total)}`}
+            {sav.withdrawals_total > 0 &&
+              ` · retiros −${money(sav.withdrawals_total)}`}
+            . Cuando se agarre dinero del ahorro, se registra aquí como
+            retiro y el saldo baja solo.
+          </p>
+          {actionError && (
+            <p className="mt-2 text-sm font-medium text-[#d92b4a]">
+              {actionError}
+            </p>
+          )}
+          <button
+            type="button"
+            aria-label={
+              open
+                ? "Ocultar movimientos del ahorro"
+                : "Ver movimientos del ahorro"
+            }
+            aria-expanded={open}
+            onClick={() => setOpen((v) => !v)}
+            className="mt-2 rounded-xl bg-[#1b1be0] px-4 py-2 text-sm font-bold text-white"
+          >
+            {open ? "Ocultar movimientos" : "Registrar movimiento / historial"}
+          </button>
+          {open && (
+            <div className="mt-3 space-y-4">
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label htmlFor="sav-kind" className={finLabelClass}>
+                    Tipo de movimiento
+                  </label>
+                  <select
+                    id="sav-kind"
+                    className={finInputClass}
+                    value={form.kind}
+                    onChange={(e) =>
+                      setForm({
+                        ...form,
+                        kind: e.target.value as "abono" | "retiro",
+                      })
+                    }
+                  >
+                    <option value="retiro">
+                      Retiro · se agarró del ahorro
+                    </option>
+                    <option value="abono">Abono · se metió al ahorro</option>
+                  </select>
+                </div>
+                <div>
+                  <label htmlFor="sav-amount" className={finLabelClass}>
+                    Monto
+                  </label>
+                  <input
+                    id="sav-amount"
+                    {...FIELDS.addSavingsMovement.amount}
+                    type="number"
+                    inputMode="numeric"
+                    className={finInputClass}
+                    value={form.amount}
+                    onChange={(e) =>
+                      setForm({ ...form, amount: e.target.value })
+                    }
+                    placeholder="$"
+                  />
+                </div>
+                <div className="col-span-2">
+                  <label htmlFor="sav-desc" className={finLabelClass}>
+                    ¿Para qué fue?
+                  </label>
+                  <input
+                    id="sav-desc"
+                    {...FIELDS.addSavingsMovement.description}
+                    className={finInputClass}
+                    value={form.description}
+                    onChange={(e) =>
+                      setForm({ ...form, description: e.target.value })
+                    }
+                    placeholder="Ej. Se pagó un gasto del estudio"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="sav-date" className={finLabelClass}>
+                    Fecha (opcional)
+                  </label>
+                  <input
+                    id="sav-date"
+                    type="date"
+                    className={finInputClass}
+                    value={form.date}
+                    onChange={(e) =>
+                      setForm({ ...form, date: e.target.value })
+                    }
+                  />
+                </div>
+                <div className="flex items-end">
+                  <button
+                    type="button"
+                    aria-label="Registrar movimiento del ahorro"
+                    disabled={addMovement.isPending}
+                    onClick={() => {
+                      if (!form.description.trim()) {
+                        setFormError(
+                          "Escribe para qué fue el movimiento.",
+                        );
+                        return;
+                      }
+                      if (
+                        form.amount.trim() === "" ||
+                        !Number.isFinite(Number(form.amount)) ||
+                        Number(form.amount) <= 0
+                      ) {
+                        setFormError("Escribe un monto mayor a cero.");
+                        return;
+                      }
+                      setFormError(null);
+                      addMovement.mutate();
+                    }}
+                    className="w-full rounded-xl bg-[#1b1be0] px-4 py-2 text-sm font-bold text-white disabled:opacity-60"
+                  >
+                    {addMovement.isPending ? "Registrando…" : "Registrar"}
+                  </button>
+                </div>
+              </div>
+              {formError && (
+                <p className="text-sm font-medium text-[#d92b4a]">
+                  {formError}
+                </p>
+              )}
+
+              <div>
+                <h4 className="font-display text-sm font-bold text-[var(--text)]">
+                  Movimientos registrados
+                </h4>
+                {sav.movements.length === 0 ? (
+                  <p className="mt-1 text-sm text-[var(--dim)]">
+                    Todavía no se registra ningún abono ni retiro.
+                  </p>
+                ) : (
+                  <ul className="mt-1.5 divide-y divide-[#e7e0f7]">
+                    {sav.movements.map((mv) => (
+                      <li key={mv.id} className="flex items-center gap-2 py-1.5">
+                        <span
+                          className={`rounded px-1.5 py-0.5 text-[10px] font-extrabold tracking-wide ${
+                            mv.kind === "abono"
+                              ? "bg-[#d9f5e7] text-[#0a8a55]"
+                              : "bg-[#fde3e9] text-[#d92b4a]"
+                          }`}
+                        >
+                          {mv.kind === "abono" ? "ABONO" : "RETIRO"}
+                        </span>
+                        <span className="min-w-0 flex-1 text-sm text-[var(--text)]">
+                          {mv.description}
+                          {mv.movement_date && (
+                            <span className="text-[var(--dim)]">
+                              {" "}
+                              · {formatDate(mv.movement_date)}
+                            </span>
+                          )}
+                        </span>
+                        <span className="text-sm font-bold text-[var(--text)]">
+                          {mv.kind === "abono" ? "+" : "−"}{" "}
+                          {money(mv.amount)}
+                        </span>
+                        <button
+                          type="button"
+                          aria-label={`Eliminar movimiento ${mv.description}`}
+                          disabled={deleteMovement.isPending}
+                          onClick={() => deleteMovement.mutate(mv.id)}
+                          className="rounded-lg px-2 py-1 text-sm font-bold text-[#d92b4a] disabled:opacity-60"
+                        >
+                          ✕
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+
+              <div>
+                <h4 className="font-display text-sm font-bold text-[var(--text)]">
+                  Ahorro generado por mes · el 5% de cada cierre
+                </h4>
+                <ul className="mt-1.5 divide-y divide-[#e7e0f7]">
+                  {sav.monthly.map((m) => (
+                    <li
+                      key={m.month}
+                      className="flex items-center gap-2 py-1.5 text-sm"
+                    >
+                      <span className="min-w-0 flex-1 text-[var(--text)]">
+                        {monthLabel(m.month)}
+                      </span>
+                      <span
+                        className={`rounded-md px-2 py-0.5 text-[11px] font-bold ${
+                          m.is_actual
+                            ? "bg-[#d9f5e7] text-[#0a8a55]"
+                            : "bg-[#fdf0d9] text-[#b97a12]"
+                        }`}
+                      >
+                        {m.is_actual ? "Cierre real" : "Estimado"}
+                      </span>
+                      <span className="font-display font-bold text-[var(--text)]">
+                        {money2(m.savings)}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+                <p className="mt-1.5 text-xs text-[var(--dim)]">
+                  El mes en curso se calcula con su estimado y se ajusta
+                  solo cuando se hace el cierre real.
+                </p>
+              </div>
+            </div>
+          )}
+        </>
+      ) : (
+        <p className="mt-2 text-sm text-[var(--dim)]">Cargando el ahorro…</p>
+      )}
+    </section>
+  );
+}
+
 function FinanceView({
   sessions,
   month,
@@ -2050,9 +2351,13 @@ function FinanceView({
   onMonthChange: (month: string) => void;
 }) {
   const queryClient = useQueryClient();
+  // Scope of the whole view: "General" (every month summed) or one
+  // month. In month scope literally every figure below — cierre, por
+  // cobrar, gastos, no-shows — belongs to that month only.
+  const [general, setGeneral] = useState(false);
   const finQuery = useQuery({
-    queryKey: ["finance", month],
-    queryFn: () => api.getMonthFinance({ month }),
+    queryKey: ["finance", general ? "general" : month],
+    queryFn: () => api.getMonthFinance({ month: general ? null : month }),
   });
   const fin = finQuery.data;
 
@@ -2074,6 +2379,7 @@ function FinanceView({
     queryClient.invalidateQueries({ queryKey: ["sessions"] });
     queryClient.invalidateQueries({ queryKey: ["months"] });
     queryClient.invalidateQueries({ queryKey: ["stats"] });
+    queryClient.invalidateQueries({ queryKey: ["savings"] });
   };
 
   type CalcForm = {
@@ -2207,13 +2513,35 @@ function FinanceView({
   const [msgClientId, setMsgClientId] = useState<number | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
 
+  // In month scope the no-show control and the message picker only see
+  // that month's sessions — same month rule as the finance figures:
+  // session date, or delivery date when there is none; a no-show with
+  // no date counts in the current month.
+  const currentMonthStr = todayString().slice(0, 7);
+  const sessionMonth = (s: Session): string | null => {
+    const ref = s.session_date ?? s.delivered_at;
+    if (ref) return ref.slice(0, 7);
+    return s.status === "no_show" ? currentMonthStr : null;
+  };
+  const scopedSessions = useMemo(
+    () =>
+      general
+        ? sessions
+        : sessions.filter((s) => sessionMonth(s) === month),
+    // sessionMonth is derived from constants only; month/general/sessions
+    // are its real inputs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [sessions, general, month],
+  );
   const noShows = useMemo(
-    () => sessions.filter((s) => s.status === "no_show"),
-    [sessions],
+    () => scopedSessions.filter((s) => s.status === "no_show"),
+    [scopedSessions],
   );
 
   const msgSession =
-    sessions.find((s) => s.id === msgClientId) ?? sessions[0] ?? null;
+    scopedSessions.find((s) => s.id === msgClientId) ??
+    scopedSessions[0] ??
+    null;
   const message =
     msgSession != null ? buildMessage(template, msgSession) : null;
 
@@ -2250,7 +2578,9 @@ function FinanceView({
 
   const monthReport = fin
     ? [
-        `Punto Cero — Cierre de ${monthLabel(month)}`,
+        general
+          ? "Punto Cero — Resumen general (todos los meses)"
+          : `Punto Cero — Cierre de ${monthLabel(month)}`,
         `Ventas: ${money2(fin.table.sales)}${fin.table.sales_is_actual ? " (cierre real)" : " (estimado)"}`,
         ...(fin.close.cash_sales != null || fin.close.transfer_sales != null
           ? [
@@ -2278,7 +2608,11 @@ function FinanceView({
   const downloadCsv = () => {
     if (!fin) return;
     const rows: (string | number)[][] = [
-      [`Punto Cero — Ventas de ${monthLabel(month)}`],
+      [
+        general
+          ? "Punto Cero — Ventas de todos los meses"
+          : `Punto Cero — Ventas de ${monthLabel(month)}`,
+      ],
       [],
       ["VENTAS"],
       ...(fin.close.sales_items.length > 0
@@ -2337,44 +2671,54 @@ function FinanceView({
       ["Reparto (50% c/u)", fin.table.each],
     ];
     downloadTextFile(
-      `ventas-${month}.csv`,
+      `ventas-${general ? "general" : month}.csv`,
       rows.map((r) => r.map(csvCell).join(";")).join("\n"),
     );
   };
 
   return (
     <div className="mt-4 space-y-4">
-      {/* Month navigation */}
+      {/* Scope navigation: the general view, or one month at a time */}
       <div className="flex items-center justify-between gap-2">
         <button
           type="button"
           aria-label="Mes anterior"
+          disabled={general}
           onClick={() => onMonthChange(shiftMonth(month, -1))}
-          className="glass-soft rounded-full px-3.5 py-1.5 text-sm font-bold text-white"
+          className="glass-soft rounded-full px-3.5 py-1.5 text-sm font-bold text-white disabled:opacity-40"
         >
           ←
         </button>
-        <h2 className="font-display text-lg font-bold text-white">
-          {monthLabel(month)}
+        <h2 className="font-display text-center text-lg font-bold text-white">
+          {general ? "General · desde el inicio" : monthLabel(month)}
         </h2>
         <button
           type="button"
           aria-label="Mes siguiente"
+          disabled={general}
           onClick={() => onMonthChange(shiftMonth(month, 1))}
-          className="glass-soft rounded-full px-3.5 py-1.5 text-sm font-bold text-white"
+          className="glass-soft rounded-full px-3.5 py-1.5 text-sm font-bold text-white disabled:opacity-40"
         >
           →
         </button>
       </div>
 
-      {/* Direct jump to any month with data */}
+      {/* General, or a direct jump to any month with data */}
       <MonthChips
         months={chipMonths}
-        selected={month}
+        selected={general ? null : month}
+        generalLabel="General"
         onSelect={(m) => {
-          if (m) onMonthChange(m);
+          if (m == null) {
+            setGeneral(true);
+          } else {
+            setGeneral(false);
+            onMonthChange(m);
+          }
         }}
       />
+
+      <SavingsCard />
 
       {finError && (
         <p className="rounded-2xl bg-[#d92b4a] px-3 py-2 text-sm font-bold text-white">
@@ -2382,7 +2726,7 @@ function FinanceView({
         </p>
       )}
 
-      <ExcelImportCard month={month} />
+      {!general && <ExcelImportCard month={month} />}
       {finQuery.isPending && (
         <p className="py-8 text-center text-sm font-medium text-white/85">
           Cargando finanzas…
@@ -2406,22 +2750,40 @@ function FinanceView({
 
       {fin && (
         <>
-          {/* Cierre del mes */}
+          {/* Cierre del mes / resumen general */}
           <section
-            aria-label="Cierre del mes"
+            aria-label={general ? "Resumen general" : "Cierre del mes"}
             className="glass rounded-3xl p-4 shadow-[0_8px_24px_rgba(20,8,80,0.25)]"
           >
             <h3 className="font-display text-base font-bold text-[var(--text)]">
-              Cierre del mes
+              {general ? "Resumen general" : "Cierre del mes"}
             </h3>
             <div className="mt-2 flex flex-wrap items-baseline gap-x-3">
               <p className="font-display text-3xl leading-none font-bold text-[var(--text)]">
-                {money(fin.estimate_with_projection)}
+                {money(general ? fin.table.sales : fin.estimate_with_projection)}
               </p>
               <p className="text-xs font-semibold text-[var(--dim)]">
-                estimado de ventas del mes
+                {general
+                  ? "ventas de todos los meses (cierre real de cada mes, o su estimado)"
+                  : "estimado de ventas del mes"}
               </p>
             </div>
+            {general && (
+              <div className="mt-2 space-y-1 text-sm text-[var(--text)]">
+                <p>
+                  Paquetes {money(fin.computed.base_total)} · fotos extra{" "}
+                  {money(fin.computed.extras_total)} · Express{" "}
+                  {money(fin.computed.express_total)} · apartados no-show{" "}
+                  {money(fin.computed.no_show_total)}
+                </p>
+                <p className="text-[var(--dim)]">
+                  {fin.computed.sessions_count} sesiones en total, desde el
+                  inicio. Todo lo de abajo suma los meses completos; el
+                  detalle de cada mes está en su botón de arriba.
+                </p>
+              </div>
+            )}
+            {!general && (
             <div className="mt-2 space-y-1 text-sm text-[var(--text)]">
               {fin.close.estimate_sales != null ? (
                 <p>
@@ -2448,12 +2810,13 @@ function FinanceView({
                 <p className="text-[var(--dim)]">{fin.close.notes}</p>
               )}
             </div>
+            )}
 
             <div className="mt-3 border-t border-[#ddd3f5] pt-3">
               {fin.close.actual_sales != null ? (
                 <div className="text-sm">
                   <p className="text-[var(--text)]">
-                    Cierre real:{" "}
+                    {general ? "Cierres reales (suma):" : "Cierre real:"}{" "}
                     <strong>{money(fin.close.actual_sales)}</strong>
                     {fin.close.actual_fixed_costs != null &&
                       ` · fijos ${money(fin.close.actual_fixed_costs)}`}
@@ -2487,29 +2850,27 @@ function FinanceView({
                         Deducciones: {money(fin.close.deductions)}
                       </p>
                     )}
-                  {fin.matches ? (
-                    <p className="mt-1 font-bold text-[#0a8a55]">
-                      ✓ Cuadra con el estimado
-                    </p>
-                  ) : (
-                    <p className="mt-1 font-bold text-[#b97a12]">
-                      {fin.difference != null && fin.difference > 0
-                        ? `El cierre real quedó ${money(fin.difference)} arriba del estimado`
-                        : `El cierre real quedó ${money(Math.abs(fin.difference ?? 0))} abajo del estimado`}
-                    </p>
-                  )}
+                  {fin.matches != null &&
+                    (fin.matches ? (
+                      <p className="mt-1 font-bold text-[#0a8a55]">
+                        ✓ Cuadra con el estimado
+                      </p>
+                    ) : (
+                      <p className="mt-1 font-bold text-[#b97a12]">
+                        {fin.difference != null && fin.difference > 0
+                          ? `El cierre real quedó ${money(fin.difference)} arriba del estimado`
+                          : `El cierre real quedó ${money(Math.abs(fin.difference ?? 0))} abajo del estimado`}
+                      </p>
+                    ))}
                 </div>
               ) : (
                 <p className="text-sm text-[var(--dim)]">
-                  Todavía no se hace el cierre real del mes. Con la
-                  calculadora lo armas aquí mismo, sin Excel: capturas las
-                  partidas vendidas, cuánto fue en efectivo y en
-                  transferencias y lo que hay que deducir; los gastos salen
-                  de los registrados y el tablero calcula el neto y el
-                  reparto.
+                  {general
+                    ? "Todavía no hay cierres reales registrados; las cifras de arriba salen de los estimados de cada mes."
+                    : "Todavía no se hace el cierre real del mes. Con la calculadora lo armas aquí mismo, sin Excel: capturas las partidas vendidas, cuánto fue en efectivo y en transferencias y lo que hay que deducir; los gastos salen de los registrados y el tablero calcula el neto y el reparto."}
                 </p>
               )}
-              {calcForm == null ? (
+              {general ? null : calcForm == null ? (
                 <button
                   type="button"
                   aria-label="Abrir la calculadora de cierre del mes"
@@ -2869,9 +3230,16 @@ function FinanceView({
                 {money(fin.receivables_total)}
               </p>
             </div>
+            <p className="mt-0.5 text-xs text-[var(--dim)]">
+              {general
+                ? "Todo lo pendiente, de todos los meses."
+                : `Solo los cargos de ${monthLabel(month).toLowerCase()}: cada cobro sale en el mes de su sesión.`}
+            </p>
             {fin.receivables.length === 0 ? (
               <p className="mt-2 text-sm text-[var(--dim)]">
-                Nadie tiene pagos pendientes por ahora.
+                {general
+                  ? "Nadie tiene pagos pendientes por ahora."
+                  : "Nadie debe cargos de este mes por ahora."}
               </p>
             ) : (
               <ul className="mt-2 divide-y divide-[#e7e0f7]">
@@ -2914,18 +3282,18 @@ function FinanceView({
             )}
           </section>
 
-          {/* Tabla del mes */}
+          {/* Tabla del mes / tabla general */}
           <section
-            aria-label="Tabla de ventas del mes"
+            aria-label={general ? "Tabla general" : "Tabla de ventas del mes"}
             className="glass rounded-3xl p-4 shadow-[0_8px_24px_rgba(20,8,80,0.25)]"
           >
             <div className="flex items-center justify-between gap-2">
               <h3 className="font-display text-base font-bold text-[var(--text)]">
-                Tabla del mes
+                {general ? "Tabla general" : "Tabla del mes"}
               </h3>
               <button
                 type="button"
-                aria-label="Descargar la tabla del mes en CSV"
+                aria-label="Descargar la tabla en CSV"
                 onClick={downloadCsv}
                 className="rounded-xl bg-[#1b1be0] px-3 py-1.5 text-xs font-bold text-white"
               >
@@ -2935,7 +3303,9 @@ function FinanceView({
             <dl className="mt-2 space-y-1.5 text-sm">
               {[
                 [
-                  `Ventas (${fin.table.sales_is_actual ? "cierre real" : "estimado"})`,
+                  general
+                    ? "Ventas (todos los meses)"
+                    : `Ventas (${fin.table.sales_is_actual ? "cierre real" : "estimado"})`,
                   money2(fin.table.sales),
                 ],
                 ["Gastos fijos", `− ${money2(fin.table.fixed)}`],
@@ -2971,14 +3341,17 @@ function FinanceView({
             </p>
           </section>
 
-          {/* Gastos fijos + gastos del mes */}
+          {/* Gastos: en el mes, desglose completo como en el Excel;
+              en General, solo los totales resumidos */}
           <section
-            aria-label="Gastos del mes"
+            aria-label={general ? "Gastos, resumen general" : "Gastos del mes"}
             className="glass rounded-3xl p-4 shadow-[0_8px_24px_rgba(20,8,80,0.25)]"
           >
             <h3 className="font-display text-base font-bold text-[var(--text)]">
-              Gastos fijos del mes
+              {general ? "Gastos · resumen general" : "Gastos fijos del mes"}
             </h3>
+            {!general && (
+              <>
             <ul className="mt-2 space-y-1.5">
               {fin.fixed_alerts.map((a) => (
                 <li
@@ -3017,12 +3390,21 @@ function FinanceView({
               Referencias del cierre real de octubre 2025; Adobe y Pixieset
               son fijos aunque la hoja de cierre los liste en variables.
             </p>
+              </>
+            )}
 
             <h4 className="font-display mt-4 text-sm font-bold text-[var(--text)]">
-              Gastos registrados · fijos {money(fin.fixed_total)} · variables{" "}
+              {general ? "Totales de todos los meses" : "Gastos registrados"}{" "}
+              · fijos {money(fin.fixed_total)} · variables{" "}
               {money(fin.variable_total)}
             </h4>
-            {fin.expenses.length === 0 ? (
+            {general ? (
+              <p className="mt-1.5 text-sm text-[var(--dim)]">
+                En la vista general los gastos van resumidos en un solo
+                monto por tipo, sin desglose. Para ver cada gasto uno por
+                uno, como en el Excel, entra a su mes.
+              </p>
+            ) : fin.expenses.length === 0 ? (
               <p className="mt-1.5 text-sm text-[var(--dim)]">
                 Sin gastos registrados en {monthLabel(month).toLowerCase()}.
               </p>
@@ -3065,6 +3447,7 @@ function FinanceView({
               </ul>
             )}
 
+            {!general && (
             <div className="mt-3 grid grid-cols-2 gap-2">
               <div className="col-span-2">
                 <label htmlFor="e-desc" className={finLabelClass}>
@@ -3159,6 +3542,7 @@ function FinanceView({
                 </button>
               </div>
             </div>
+            )}
             {expenseError && (
               <p className="mt-2 text-sm font-medium text-[#d92b4a]">
                 {expenseError}
@@ -3174,10 +3558,18 @@ function FinanceView({
             <h3 className="font-display text-base font-bold text-[var(--text)]">
               No-shows · apartados que se quedan
             </h3>
+            <p className="mt-0.5 text-xs text-[var(--dim)]">
+              {general
+                ? "Todos los no-shows registrados."
+                : `Solo los de ${monthLabel(month).toLowerCase()}: cada apartado cuenta en el mes de su sesión.`}
+              {noShows.length > 0 &&
+                ` ${noShows.length} en total · apartados ${money(noShows.length * 200)}.`}
+            </p>
             {noShows.length === 0 ? (
               <p className="mt-2 text-sm text-[var(--dim)]">
-                Sin no-shows registrados. Se marcan desde el editor de la
-                sesión, con el estado «No-show».
+                {general
+                  ? "Sin no-shows registrados. Se marcan desde el editor de la sesión, con el estado «No-show»."
+                  : "Sin no-shows en este mes. Se marcan desde el editor de la sesión, con el estado «No-show»."}
               </p>
             ) : (
               <ul className="mt-2 divide-y divide-[#e7e0f7]">
@@ -3211,7 +3603,7 @@ function FinanceView({
           >
             <div className="flex items-center justify-between gap-2">
               <h3 className="font-display text-base font-bold text-[var(--text)]">
-                Reporte del mes
+                {general ? "Reporte general" : "Reporte del mes"}
               </h3>
               <button
                 type="button"
@@ -3267,7 +3659,7 @@ function FinanceView({
                   value={msgSession?.id ?? ""}
                   onChange={(e) => setMsgClientId(Number(e.target.value))}
                 >
-                  {sessions.map((s) => (
+                  {scopedSessions.map((s) => (
                     <option key={s.id} value={s.id}>
                       {s.client_name}
                     </option>
@@ -3295,9 +3687,9 @@ function FinanceView({
               </>
             ) : (
               <p className="mt-2 text-sm text-[var(--dim)]">
-                Esta clienta no tiene cargos extra registrados, así que la
-                plantilla de cobro no aplica. Elige otra clienta u otra
-                plantilla.
+                {scopedSessions.length === 0
+                  ? "No hay sesiones registradas en este mes."
+                  : "Esta clienta no tiene cargos extra registrados, así que la plantilla de cobro no aplica. Elige otra clienta u otra plantilla."}
               </p>
             )}
           </section>
