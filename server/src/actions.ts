@@ -5,7 +5,7 @@
 // dates are board dates entered by hand — never computed from other dates.
 
 import { defineAction, z, type ActionsModule } from "@hatch/space-sdk";
-import { asc, eq } from "drizzle-orm";
+import { asc, desc, eq } from "drizzle-orm";
 import * as schema from "./schema";
 
 const statusEnum = z.enum(["pendiente", "en_edicion", "entregada", "no_show"]);
@@ -271,7 +271,8 @@ function sessionCharges(row: SessionRow) {
 }
 
 const financeResponse = z.object({
-  month: z.string(),
+  // The scope's month (YYYY-MM), or null for the general view.
+  month: z.string().nullable(),
   computed: z.object({
     sessions_count: z.number(),
     by_package: z.array(
@@ -311,6 +312,7 @@ const financeResponse = z.object({
   expenses: z.array(
     z.object({
       id: z.number(),
+      month: z.string(),
       expense_date: z.string().nullable(),
       kind: z.enum(["fijo", "variable"]),
       description: z.string(),
@@ -538,6 +540,179 @@ const statsResponse = z.object({
       z.object({ value: z.string(), count: z.number() }),
     ),
   }),
+});
+
+// --- Per-month finance figures ----------------------------------------------
+// One month's full finance picture, computed from the board's rows. Both
+// getMonthFinance (one month, or every month summed for the general view)
+// and getSavings (the 5% each month generates) read from this single
+// helper so the figures can never drift apart.
+
+type MonthCloseRow = typeof schema.monthlyCloses.$inferSelect;
+type ExpenseRow = typeof schema.expenses.$inferSelect;
+
+function currentMonthChihuahua(): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Chihuahua",
+    year: "numeric",
+    month: "2-digit",
+  })
+    .format(new Date())
+    .slice(0, 7);
+}
+
+// The month a session counts in for finance: its session date, or its
+// delivery date when it has no session date. A no-show without any date
+// still kept its $200 deposit, so by Leslye's rule it counts in the
+// current month; any other undated session counts in no month.
+function financeMonthOf(row: SessionRow, currentMonth: string): string | null {
+  const ref = row.sessionDate ?? row.deliveredAt;
+  if (ref != null) return ref.slice(0, 7);
+  return row.status === "no_show" ? currentMonth : null;
+}
+
+function monthFigures(
+  month: string,
+  allSessions: SessionRow[],
+  allExpenses: ExpenseRow[],
+  close: MonthCloseRow | null,
+  currentMonth: string,
+) {
+  const monthSessions = allSessions.filter(
+    (row) => financeMonthOf(row, currentMonth) === month,
+  );
+  const monthExpenses = allExpenses
+    .filter((e) => e.month === month)
+    .sort((a, b) => a.id - b.id);
+
+  // Sales estimate computed live from the board.
+  const byPackageMap = new Map<string, { count: number; amount: number }>();
+  let baseTotal = 0;
+  let extrasTotal = 0;
+  let expressTotal = 0;
+  let sessionsCount = 0;
+  let noShowCount = 0;
+  for (const row of monthSessions) {
+    if (row.status === "no_show") {
+      noShowCount++;
+      continue;
+    }
+    // A session the client has not paid is not a sale yet: its full
+    // amount waits in por cobrar until she pays.
+    if (row.unpaid) continue;
+    sessionsCount++;
+    const charges = sessionCharges(row);
+    if (charges.pkg) {
+      const entry = byPackageMap.get(charges.pkg) ?? { count: 0, amount: 0 };
+      entry.count++;
+      entry.amount += charges.base;
+      byPackageMap.set(charges.pkg, entry);
+      baseTotal += charges.base;
+    }
+    extrasTotal += charges.extrasCharge;
+    expressTotal += charges.expressFee;
+  }
+  const noShowTotal = noShowCount * NO_SHOW_DEPOSIT;
+  const computedTotal = baseTotal + extrasTotal + expressTotal + noShowTotal;
+
+  const estimateHeadline = close?.estimateSales ?? computedTotal;
+  const projected = close?.projectedSales ?? 0;
+  const estimateWithProjection = estimateHeadline + projected;
+  const actualSales = close?.actualSales ?? null;
+
+  const fixedRows = monthExpenses.filter((e) => e.kind === "fijo");
+  const fixedFromExpenses = fixedRows.reduce((sum, e) => sum + e.amount, 0);
+  const variableFromExpenses = monthExpenses
+    .filter((e) => e.kind === "variable")
+    .reduce((sum, e) => sum + e.amount, 0);
+  // Fixed costs always count in Finanzas (Leslye's rule): when the month
+  // has registered fixed rows, those are used; when it has none, the
+  // reference amounts (renta, Adobe, Pixieset) stand in. Never both —
+  // no double counting.
+  const fixedCostsFromReference = fixedRows.length === 0;
+  const fixedCosts = fixedCostsFromReference
+    ? FIXED_COSTS_REFERENCE.map((ref) => ({
+        label: ref.label,
+        amount: ref.amount,
+        from_reference: true,
+      }))
+    : fixedRows.map((e) => ({
+        label: e.description,
+        amount: e.amount,
+        from_reference: false,
+      }));
+  const effectiveFixed = fixedCosts.reduce((sum, c) => sum + c.amount, 0);
+  const tableSales = actualSales ?? estimateWithProjection;
+  const tableFixed = close?.actualFixedCosts ?? effectiveFixed;
+  const tableVariable = close?.actualVariableCosts ?? variableFromExpenses;
+  const tableDeductions = close?.deductions ?? 0;
+  const net = tableSales - tableFixed - tableVariable - tableDeductions;
+  const savings = Math.round(net * 0.05 * 100) / 100;
+  const each = Math.round((net - savings) * 0.5 * 100) / 100;
+
+  return {
+    monthSessions,
+    monthExpenses,
+    byPackage: [...byPackageMap.entries()].map(([pkg, v]) => ({
+      package: pkg,
+      count: v.count,
+      amount: v.amount,
+    })),
+    baseTotal,
+    extrasTotal,
+    expressTotal,
+    sessionsCount,
+    noShowCount,
+    noShowTotal,
+    computedTotal,
+    estimateHeadline,
+    estimateWithProjection,
+    actualSales,
+    fixedFromExpenses,
+    variableFromExpenses,
+    fixedCosts,
+    fixedCostsFromReference,
+    table: {
+      sales: tableSales,
+      sales_is_actual: actualSales != null,
+      fixed: tableFixed,
+      variable: tableVariable,
+      deductions: tableDeductions,
+      net,
+      savings,
+      each,
+    },
+  };
+}
+
+type MonthFigures = ReturnType<typeof monthFigures>;
+
+// --- Savings (ahorro) ---------------------------------------------------------
+// The balance is generated live: every month with data contributes the
+// 5% of its finance table (real close when the month has one, the board
+// estimate otherwise), and the registered abonos/retiros move it up or
+// down. Nothing is stored but the manual movements themselves.
+const savingsResponse = z.object({
+  balance: z.number(),
+  generated_total: z.number(),
+  deposits_total: z.number(),
+  withdrawals_total: z.number(),
+  monthly: z.array(
+    z.object({
+      month: z.string(),
+      savings: z.number(),
+      is_actual: z.boolean(),
+    }),
+  ),
+  movements: z.array(
+    z.object({
+      id: z.number(),
+      movement_date: z.string().nullable(),
+      kind: z.enum(["abono", "retiro"]),
+      description: z.string(),
+      amount: z.number(),
+    }),
+  ),
 });
 
 export const Actions = {
@@ -778,134 +953,119 @@ export const Actions = {
 
   getMonthFinance: defineAction({
     description:
-      "Computes one month's Punto Cero finance: sales estimate from the board (packages + extra photos + Express + no-show deposits — an undated no-show counts in the current month), the registered estimate and Daniela's real close when present, the estimate-vs-real comparison, the VENTAS-style table (net, 5% savings, 50/50 split), the month's expenses, the fixed costs the table counts (registered fixed rows, or the renta/Adobe/Pixieset reference amounts when none are registered) and the por-cobrar list. Sessions marked unpaid are excluded from sales and owed in full in por cobrar.",
+      "Computes Punto Cero finance for one month — or, with month = null, the general view that sums every month with data, so every figure belongs to the chosen scope. Per month: sales estimate from the board (packages + extra photos + Express + no-show deposits — an undated no-show counts in the current month), the registered estimate and the real close when present, the estimate-vs-real comparison (month scope only), the VENTAS-style table (net, 5% savings, 50/50 split), the expenses, the fixed costs the table counts (registered fixed rows, or the renta/Adobe/Pixieset reference amounts when none are registered) and the por-cobrar list (month scope: only that month's charges; general: everything pending). Sessions marked unpaid are excluded from sales and owed in full in por cobrar.",
     request: z.object({
-      month: z.string().regex(/^\d{4}-\d{2}$/, "El mes debe ser AAAA-MM"),
+      month: z
+        .string()
+        .regex(/^\d{4}-\d{2}$/, "El mes debe ser AAAA-MM")
+        .nullable(),
     }),
     response: financeResponse,
     handler: async (ctx, args): Promise<z.infer<typeof financeResponse>> => {
       const db = ctx.db<typeof schema>();
-      const month = args.month;
+      const scopeMonth = args.month;
       const allSessions = await db.select().from(schema.sessions);
-      const monthExpenses = await db
-        .select()
-        .from(schema.expenses)
-        .where(eq(schema.expenses.month, month))
-        .orderBy(asc(schema.expenses.id));
-      const closeRows = await db
-        .select()
-        .from(schema.monthlyCloses)
-        .where(eq(schema.monthlyCloses.month, month));
-      const close = closeRows[0] ?? null;
+      const allExpenses = await db.select().from(schema.expenses);
+      const allCloses = await db.select().from(schema.monthlyCloses);
+      const closeByMonth = new Map(allCloses.map((c) => [c.month, c]));
+      const currentMonth = currentMonthChihuahua();
 
-      const inMonth = (row: SessionRow) => {
-        const ref = row.sessionDate ?? row.deliveredAt;
-        return ref != null && ref.startsWith(month);
-      };
-      // A no-show with no date on record still kept its $200 deposit:
-      // by Leslye's rule it counts in the current month (the studio's
-      // timezone), whatever month is being viewed.
-      const currentMonth = new Intl.DateTimeFormat("en-CA", {
-        timeZone: "America/Chihuahua",
-        year: "numeric",
-        month: "2-digit",
-      })
-        .format(new Date())
-        .slice(0, 7);
-      const noShowInMonth = (row: SessionRow) => {
-        const ref = row.sessionDate ?? row.deliveredAt;
-        return ref != null ? ref.startsWith(month) : month === currentMonth;
-      };
-
-      // Sales estimate computed live from the board.
-      const byPackageMap = new Map<string, { count: number; amount: number }>();
-      let baseTotal = 0;
-      let extrasTotal = 0;
-      let expressTotal = 0;
-      let sessionsCount = 0;
-      let noShowCount = 0;
+      const monthsWithData = new Set<string>();
       for (const row of allSessions) {
-        if (row.status === "no_show") {
-          if (noShowInMonth(row)) noShowCount++;
-          continue;
-        }
-        if (!inMonth(row)) continue;
-        // A session the client has not paid is not a sale yet: its full
-        // amount waits in por cobrar until she pays.
-        if (row.unpaid) continue;
-        sessionsCount++;
-        const charges = sessionCharges(row);
-        if (charges.pkg) {
-          const entry = byPackageMap.get(charges.pkg) ?? { count: 0, amount: 0 };
-          entry.count++;
-          entry.amount += charges.base;
-          byPackageMap.set(charges.pkg, entry);
-          baseTotal += charges.base;
-        }
-        extrasTotal += charges.extrasCharge;
-        expressTotal += charges.expressFee;
+        const m = financeMonthOf(row, currentMonth);
+        if (m) monthsWithData.add(m);
       }
-      const noShowTotal = noShowCount * NO_SHOW_DEPOSIT;
-      const computedTotal = baseTotal + extrasTotal + expressTotal + noShowTotal;
+      for (const e of allExpenses) monthsWithData.add(e.month);
+      for (const c of allCloses) monthsWithData.add(c.month);
+      const scopeMonths =
+        scopeMonth != null ? [scopeMonth] : [...monthsWithData].sort();
+      const figures = scopeMonths.map((m) =>
+        monthFigures(
+          m,
+          allSessions,
+          allExpenses,
+          closeByMonth.get(m) ?? null,
+          currentMonth,
+        ),
+      );
 
-      const estimateHeadline = close?.estimateSales ?? computedTotal;
-      const projected = close?.projectedSales ?? 0;
-      const estimateWithProjection = estimateHeadline + projected;
-      const actualSales = close?.actualSales ?? null;
-      // Only compare when an estimate basis exists (a registered estimate
-      // or sessions the board can price); a month with only real figures
-      // has nothing to match against.
+      const sum = (pick: (f: MonthFigures) => number) =>
+        figures.reduce((acc, f) => acc + pick(f), 0);
+      const byPackageMap = new Map<string, { count: number; amount: number }>();
+      for (const f of figures) {
+        for (const bp of f.byPackage) {
+          const entry = byPackageMap.get(bp.package) ?? { count: 0, amount: 0 };
+          entry.count += bp.count;
+          entry.amount += bp.amount;
+          byPackageMap.set(bp.package, entry);
+        }
+      }
+
+      const scopeExpenses = figures.flatMap((f) => f.monthExpenses);
+      const scopeCloses = scopeMonths
+        .map((m) => closeByMonth.get(m))
+        .filter((c): c is MonthCloseRow => c != null);
+      // Sums a close field over the scope's closes; null when no close
+      // in the scope carries the field.
+      const sumClose = (
+        pick: (c: MonthCloseRow) => number | null,
+      ): number | null => {
+        let total: number | null = null;
+        for (const c of scopeCloses) {
+          const v = pick(c);
+          if (v != null) total = (total ?? 0) + v;
+        }
+        return total;
+      };
+      // Close-calculator items merged across the scope's closes (used by
+      // the general view's CSV; a single month reads its own close).
+      const mergedCounts: Partial<Record<SaleItemKey, number>> = {};
+      for (const c of scopeCloses) {
+        const counts = parseSaleCounts(c.salesItems);
+        if (!counts) continue;
+        for (const key of SALE_KEYS)
+          mergedCounts[key] = (mergedCounts[key] ?? 0) + counts[key];
+      }
+      const mergedItems = SALE_KEYS.filter(
+        (key) => (mergedCounts[key] ?? 0) > 0,
+      ).map((key) => ({
+        key,
+        label: SALE_CATALOG[key].label,
+        price: SALE_CATALOG[key].price,
+        count: mergedCounts[key] ?? 0,
+        amount: (mergedCounts[key] ?? 0) * SALE_CATALOG[key].price,
+      }));
+
+      const single = scopeMonth != null ? (figures[0] ?? null) : null;
+      const close =
+        scopeMonth != null ? (closeByMonth.get(scopeMonth) ?? null) : null;
+
+      // Estimate-vs-real comparison only exists for a single month.
+      const estimateHeadline = sum((f) => f.estimateHeadline);
+      const estimateWithProjection = sum((f) => f.estimateWithProjection);
+      const computedTotal = sum((f) => f.computedTotal);
+      const actualSales =
+        scopeMonth != null
+          ? (single?.actualSales ?? null)
+          : sumClose((c) => c.actualSales);
       const hasEstimate =
-        close?.estimateSales != null || computedTotal > 0;
+        scopeMonth != null &&
+        (close?.estimateSales != null || computedTotal > 0);
       const difference =
         actualSales != null && hasEstimate
           ? actualSales - estimateWithProjection
           : null;
 
-      const fixedRows = monthExpenses.filter((e) => e.kind === "fijo");
-      const fixedFromExpenses = fixedRows.reduce(
-        (sum, e) => sum + e.amount,
-        0,
-      );
-      const variableFromExpenses = monthExpenses
-        .filter((e) => e.kind === "variable")
-        .reduce((sum, e) => sum + e.amount, 0);
-      // Fixed costs always count in Finanzas (Leslye's rule): when the
-      // month has registered fixed rows, those are used; when it has
-      // none, the reference amounts (renta, Adobe, Pixieset) stand in.
-      // Never both — no double counting.
-      const fixedCostsFromReference = fixedRows.length === 0;
-      const fixedCosts = fixedCostsFromReference
-        ? FIXED_COSTS_REFERENCE.map((ref) => ({
-            label: ref.label,
-            amount: ref.amount,
-            from_reference: true,
-          }))
-        : fixedRows.map((e) => ({
-            label: e.description,
-            amount: e.amount,
-            from_reference: false,
-          }));
-      const effectiveFixed = fixedCosts.reduce(
-        (sum, c) => sum + c.amount,
-        0,
-      );
-      const tableSales = actualSales ?? estimateWithProjection;
-      const tableFixed = close?.actualFixedCosts ?? effectiveFixed;
-      const tableVariable = close?.actualVariableCosts ?? variableFromExpenses;
-      const tableDeductions = close?.deductions ?? 0;
-      const net = tableSales - tableFixed - tableVariable - tableDeductions;
-      const savings = Math.round(net * 0.05 * 100) / 100;
-      const each = Math.round((net - savings) * 0.5 * 100) / 100;
-
+      // Fixed-cost alerts: in month scope, what that month registered
+      // for each reference item; in the general view, the all-time sums.
       const fixedAlerts = FIXED_COSTS_REFERENCE.map((ref) => {
-        const registered = monthExpenses
+        const registered = scopeExpenses
           .filter(
             (e) =>
               e.kind === "fijo" &&
               e.description.toLowerCase().includes(ref.match),
           )
-          .reduce((sum, e) => sum + e.amount, 0);
+          .reduce((acc, e) => acc + e.amount, 0);
         return {
           label: ref.label,
           reference_amount: ref.amount,
@@ -913,8 +1073,64 @@ export const Actions = {
         };
       });
 
+      // The fixed costs the table counts: a single month lists its own
+      // rows (or the reference); the general view groups every
+      // registered fixed row by description (or the reference when no
+      // fixed row exists at all).
+      let fixedCosts: {
+        label: string;
+        amount: number;
+        from_reference: boolean;
+      }[];
+      let fixedCostsFromReference: boolean;
+      if (single) {
+        fixedCosts = single.fixedCosts;
+        fixedCostsFromReference = single.fixedCostsFromReference;
+      } else {
+        const allFixed = scopeExpenses.filter((e) => e.kind === "fijo");
+        fixedCostsFromReference = allFixed.length === 0;
+        if (fixedCostsFromReference) {
+          fixedCosts = FIXED_COSTS_REFERENCE.map((ref) => ({
+            label: ref.label,
+            amount: ref.amount,
+            from_reference: true,
+          }));
+        } else {
+          const grouped = new Map<string, number>();
+          for (const e of allFixed)
+            grouped.set(
+              e.description,
+              (grouped.get(e.description) ?? 0) + e.amount,
+            );
+          fixedCosts = [...grouped.entries()].map(([label, amount]) => ({
+            label,
+            amount,
+            from_reference: false,
+          }));
+        }
+      }
+
+      const table = {
+        sales: sum((f) => f.table.sales),
+        sales_is_actual:
+          figures.length > 0 && figures.every((f) => f.table.sales_is_actual),
+        fixed: sum((f) => f.table.fixed),
+        variable: sum((f) => f.table.variable),
+        deductions: sum((f) => f.table.deductions),
+        net: sum((f) => f.table.net),
+        savings: Math.round(sum((f) => f.table.savings) * 100) / 100,
+        each: Math.round(sum((f) => f.table.each) * 100) / 100,
+      };
+
+      // Por cobrar: in month scope only that month's pending charges;
+      // in the general view, everything still pending.
       const receivables = allSessions
         .filter((row) => row.status !== "no_show")
+        .filter(
+          (row) =>
+            scopeMonth == null ||
+            financeMonthOf(row, currentMonth) === scopeMonth,
+        )
         .map((row) => ({ row, charges: sessionCharges(row) }))
         .filter(({ row, charges }) =>
           row.unpaid
@@ -939,64 +1155,80 @@ export const Actions = {
         .sort((a, b) => b.total - a.total);
 
       return {
-        month,
+        month: scopeMonth,
         computed: {
-          sessions_count: sessionsCount,
+          sessions_count: sum((f) => f.sessionsCount),
           by_package: [...byPackageMap.entries()].map(([pkg, v]) => ({
             package: pkg,
             count: v.count,
             amount: v.amount,
           })),
-          base_total: baseTotal,
-          extras_total: extrasTotal,
-          express_total: expressTotal,
-          no_show_count: noShowCount,
-          no_show_total: noShowTotal,
+          base_total: sum((f) => f.baseTotal),
+          extras_total: sum((f) => f.extrasTotal),
+          express_total: sum((f) => f.expressTotal),
+          no_show_count: sum((f) => f.noShowCount),
+          no_show_total: sum((f) => f.noShowTotal),
           total: computedTotal,
         },
         close: {
-          estimate_sales: close?.estimateSales ?? null,
-          projected_sales: close?.projectedSales ?? null,
-          actual_sales: close?.actualSales ?? null,
-          actual_fixed_costs: close?.actualFixedCosts ?? null,
-          actual_variable_costs: close?.actualVariableCosts ?? null,
-          cash_sales: close?.cashSales ?? null,
-          transfer_sales: close?.transferSales ?? null,
-          deductions: close?.deductions ?? null,
-          sales_items: (() => {
-            const counts = parseSaleCounts(close?.salesItems ?? null);
-            return counts ? saleItemsList(counts) : [];
-          })(),
-          notes: close?.notes ?? null,
+          estimate_sales:
+            scopeMonth != null
+              ? (close?.estimateSales ?? null)
+              : sumClose((c) => c.estimateSales),
+          projected_sales:
+            scopeMonth != null
+              ? (close?.projectedSales ?? null)
+              : sumClose((c) => c.projectedSales),
+          actual_sales: actualSales,
+          actual_fixed_costs:
+            scopeMonth != null
+              ? (close?.actualFixedCosts ?? null)
+              : sumClose((c) => c.actualFixedCosts),
+          actual_variable_costs:
+            scopeMonth != null
+              ? (close?.actualVariableCosts ?? null)
+              : sumClose((c) => c.actualVariableCosts),
+          cash_sales:
+            scopeMonth != null
+              ? (close?.cashSales ?? null)
+              : sumClose((c) => c.cashSales),
+          transfer_sales:
+            scopeMonth != null
+              ? (close?.transferSales ?? null)
+              : sumClose((c) => c.transferSales),
+          deductions:
+            scopeMonth != null
+              ? (close?.deductions ?? null)
+              : sumClose((c) => c.deductions),
+          sales_items:
+            scopeMonth != null
+              ? (() => {
+                  const counts = parseSaleCounts(close?.salesItems ?? null);
+                  return counts ? saleItemsList(counts) : [];
+                })()
+              : mergedItems,
+          notes: scopeMonth != null ? (close?.notes ?? null) : null,
         },
         estimate_headline: estimateHeadline,
         estimate_with_projection: estimateWithProjection,
         difference,
         matches: difference != null ? difference === 0 : null,
-        expenses: monthExpenses.map((e) => ({
+        expenses: scopeExpenses.map((e) => ({
           id: e.id,
+          month: e.month,
           expense_date: e.expenseDate,
           kind: e.kind,
           description: e.description,
           amount: e.amount,
         })),
-        fixed_total: fixedFromExpenses,
-        variable_total: variableFromExpenses,
-        table: {
-          sales: tableSales,
-          sales_is_actual: actualSales != null,
-          fixed: tableFixed,
-          variable: tableVariable,
-          deductions: tableDeductions,
-          net,
-          savings,
-          each,
-        },
+        fixed_total: sum((f) => f.fixedFromExpenses),
+        variable_total: sum((f) => f.variableFromExpenses),
+        table,
         fixed_alerts: fixedAlerts,
         fixed_costs: fixedCosts,
         fixed_costs_from_reference: fixedCostsFromReference,
         receivables,
-        receivables_total: receivables.reduce((sum, r) => sum + r.total, 0),
+        receivables_total: receivables.reduce((acc, r) => acc + r.total, 0),
       };
     },
   }),
@@ -1647,6 +1879,120 @@ export const Actions = {
       }
       if (created + updated > 0) ctx.invalidateQueries();
       return { created, updated, rows: args.rows.length };
+    },
+  }),
+
+  getSavings: defineAction({
+    description:
+      "Computes the studio's savings (ahorro) balance: every month with data generates its 5% from that month's finance table (the real close when the month has one, the board estimate otherwise — the current month updates live as its estimate moves), and the registered manual movements (abonos and retiros) raise or lower it. Returns the current balance, the generated total, the movement totals, the per-month generated amounts (newest first) and the registered movements (newest first).",
+    request: z.object({}),
+    response: savingsResponse,
+    handler: async (ctx): Promise<z.infer<typeof savingsResponse>> => {
+      const db = ctx.db<typeof schema>();
+      const allSessions = await db.select().from(schema.sessions);
+      const allExpenses = await db.select().from(schema.expenses);
+      const allCloses = await db.select().from(schema.monthlyCloses);
+      const closeByMonth = new Map(allCloses.map((c) => [c.month, c]));
+      const currentMonth = currentMonthChihuahua();
+
+      const months = new Set<string>();
+      for (const row of allSessions) {
+        const m = financeMonthOf(row, currentMonth);
+        if (m) months.add(m);
+      }
+      for (const c of allCloses) months.add(c.month);
+
+      const monthly: z.infer<typeof savingsResponse>["monthly"] = [];
+      let generatedTotal = 0;
+      for (const m of [...months].sort()) {
+        const close = closeByMonth.get(m) ?? null;
+        const figures = monthFigures(
+          m,
+          allSessions,
+          allExpenses,
+          close,
+          currentMonth,
+        );
+        monthly.push({
+          month: m,
+          savings: figures.table.savings,
+          is_actual: close?.actualSales != null,
+        });
+        generatedTotal += figures.table.savings;
+      }
+      generatedTotal = Math.round(generatedTotal * 100) / 100;
+
+      const movementRows = await db
+        .select()
+        .from(schema.savingsMovements)
+        .orderBy(desc(schema.savingsMovements.id));
+      let depositsTotal = 0;
+      let withdrawalsTotal = 0;
+      for (const mv of movementRows) {
+        if (mv.kind === "abono") depositsTotal += mv.amount;
+        else withdrawalsTotal += mv.amount;
+      }
+      return {
+        balance:
+          Math.round(
+            (generatedTotal + depositsTotal - withdrawalsTotal) * 100,
+          ) / 100,
+        generated_total: generatedTotal,
+        deposits_total: depositsTotal,
+        withdrawals_total: withdrawalsTotal,
+        monthly: monthly.reverse(),
+        movements: movementRows.map((mv) => ({
+          id: mv.id,
+          movement_date: mv.movementDate,
+          kind: mv.kind,
+          description: mv.description,
+          amount: mv.amount,
+        })),
+      };
+    },
+  }),
+
+  addSavingsMovement: defineAction({
+    description:
+      "Registers a manual savings movement: an abono (extra money put into the ahorro) or a retiro (money taken out of the ahorro, e.g. to pay an expense). The savings balance updates immediately.",
+    request: z.object({
+      kind: z.enum(["abono", "retiro"]),
+      amount: z.number().int().min(1).max(10000000),
+      description: z.string().trim().min(1).max(200),
+      movement_date: dateString.nullable(),
+    }),
+    response: z.object({ id: z.number() }),
+    async handler(ctx, args) {
+      const db = ctx.db<typeof schema>();
+      const result = await db
+        .insert(schema.savingsMovements)
+        .values({
+          kind: args.kind,
+          amount: args.amount,
+          description: args.description,
+          movementDate: args.movement_date,
+        })
+        .returning({ id: schema.savingsMovements.id });
+      const inserted = result[0];
+      if (!inserted)
+        throw new Error("addSavingsMovement: insert returned no rows");
+      ctx.invalidateQueries();
+      return { id: inserted.id };
+    },
+  }),
+
+  deleteSavingsMovement: defineAction({
+    description:
+      "Deletes one registered savings movement (abono or retiro); the balance updates immediately.",
+    request: z.object({ id: z.number().int().positive() }),
+    response: okResponse,
+    handler: async (ctx, args): Promise<z.infer<typeof okResponse>> => {
+      const db = ctx.db<typeof schema>();
+      await db
+        .delete(schema.savingsMovements)
+        .where(eq(schema.savingsMovements.id, args.id));
+      ctx.invalidateQueries();
+      return { ok: true };
     },
   }),
 } satisfies ActionsModule;
